@@ -1,10 +1,6 @@
 {
   "$schema": "https://unpkg.com/knip@6.37.0/schema.json",
-  "ignoreDependencies": [
-    "@expo/sudo-prompt",
-    "@peculiar/x509",
-    "citty",
-    "picocolors"
-  ],
+  "ignoreBinaries": ["openssl"],
+  "ignoreDependencies": ["@expo/sudo-prompt", "citty", "picocolors"],
   "project": ["src/**/*.ts", "*.config.ts"]
 }
