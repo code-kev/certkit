@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import {
+import fs, {
   appendFileSync,
   chmodSync,
   existsSync,
@@ -11,6 +11,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import { homedir, tmpdir } from 'node:os';
 import { join, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -460,6 +461,58 @@ describe('CA directory lock', () => {
       message: expect.stringContaining(lockPath),
     });
   });
+
+  it('retries acquisition when a lock disappears before its record can be read', async () => {
+    const dir = join(tempRoot, 'ca');
+    mkdirSync(dir, { mode: 0o700 });
+    const lockPath = join(dir, '.lock');
+    writeFileSync(
+      lockPath,
+      JSON.stringify({
+        pid: process.pid,
+        startedAt: new Date().toISOString(),
+      }),
+      { mode: 0o600 },
+    );
+    let removed = false;
+    const guard: FsGuard = {
+      protectDirectory: () => undefined,
+      assertProtectedDirectory: () => undefined,
+      assertProtectedFile: (path) => {
+        if (!removed && path === lockPath) {
+          removed = true;
+          rmSync(path);
+        }
+      },
+    };
+
+    await expect(
+      withLock(dir, async () => 'acquired', { fsGuard: guard }),
+    ).resolves.toBe('acquired');
+    expect(removed).toBe(true);
+    expect(existsSync(lockPath)).toBe(false);
+  });
+
+  it('keeps the lock if closing its descriptor fails', async () => {
+    const dir = join(tempRoot, 'ca');
+    const close = fs.closeSync;
+    fs.closeSync = (fd) => {
+      close(fd);
+      throw new Error('simulated close failure');
+    };
+    syncBuiltinESMExports();
+
+    try {
+      await expect(withLock(dir, async () => undefined)).rejects.toMatchObject({
+        code: 'CA_UNREADABLE',
+      });
+      expect(existsSync(join(dir, '.lock'))).toBe(true);
+    } finally {
+      fs.closeSync = close;
+      syncBuiltinESMExports();
+      rmSync(join(dir, '.lock'), { force: true });
+    }
+  });
 });
 
 it.skipIf(!workerDir)('cadir lock race child', async () => {
@@ -525,7 +578,7 @@ it.skipIf(workerDir)(
 );
 
 describe('Windows ACL guard', () => {
-  it('uses icacls argv and accepts only the current user and documented system principals', () => {
+  it('uses icacls argv and accepts the current user grant', () => {
     const path = 'C:\\Users\\test\\AppData\\Local\\certkit';
     const calls: Array<{ command: string; args: readonly string[] }> = [];
     const run = (command: string, args: readonly string[]) => {
@@ -534,8 +587,6 @@ describe('Windows ACL guard', () => {
       if (args.includes('/inheritance:r'))
         return 'Successfully processed 1 files; Failed processing 0 files';
       return [
-        `${path} BUILTIN\\Administrators:(F)`,
-        '                  NT AUTHORITY\\SYSTEM:(F)',
         '                  DOMAIN\\test:(OI)(CI)(F)',
         'Successfully processed 1 files; Failed processing 0 files',
       ].join('\r\n');
@@ -560,10 +611,65 @@ describe('Windows ACL guard', () => {
       if (args.includes('/inheritance:r'))
         return 'Successfully processed 1 files; Failed processing 0 files';
       return [
-        `${path} BUILTIN\\Administrators:(F)`,
-        '                  NT AUTHORITY\\SYSTEM:(F)',
         '                  DOMAIN\\test:(OI)(CI)(F)',
         '                  Everyone:(RX)',
+        'Successfully processed 1 files; Failed processing 0 files',
+      ].join('\r\n');
+    };
+    const guard = createWindowsFsGuard(run);
+    expect(() => guard.protectDirectory(path)).toThrowError(
+      expect.objectContaining({ code: 'CA_UNREADABLE' }),
+    );
+  });
+
+  it.each([
+    ['SYSTEM', 'NT AUTHORITY\\SYSTEM'],
+    ['Administrators', 'BUILTIN\\Administrators'],
+  ])('fails closed on an unverified explicit %s grant', (_name, principal) => {
+    const path = 'C:\\Users\\test\\AppData\\Local\\certkit';
+    const run = (command: string, args: readonly string[]) => {
+      if (command === 'whoami') return '"DOMAIN\\test","S-1-5-21-1-2-3-1001"';
+      if (args.includes('/inheritance:r'))
+        return 'Successfully processed 1 files; Failed processing 0 files';
+      return [
+        `${path} ${principal}:(F)`,
+        '                  DOMAIN\\test:(OI)(CI)(F)',
+        'Successfully processed 1 files; Failed processing 0 files',
+      ].join('\r\n');
+    };
+    const guard = createWindowsFsGuard(run);
+    expect(() => guard.protectDirectory(path)).toThrowError(
+      expect.objectContaining({ code: 'CA_UNREADABLE' }),
+    );
+  });
+
+  it('does not skip a broad first ACE on a drive-root path', () => {
+    const path = 'C:\\';
+    const run = (command: string, args: readonly string[]) => {
+      if (command === 'whoami') return '"DOMAIN\\test","S-1-5-21-1-2-3-1001"';
+      if (args.includes('/inheritance:r'))
+        return 'Successfully processed 1 files; Failed processing 0 files';
+      return [
+        `${path}Everyone:(OI)(CI)(F)`,
+        '                  DOMAIN\\test:(OI)(CI)(F)',
+        'Successfully processed 1 files; Failed processing 0 files',
+      ].join('\r\n');
+    };
+    const guard = createWindowsFsGuard(run);
+    expect(() => guard.protectDirectory(path)).toThrowError(
+      expect.objectContaining({ code: 'CA_UNREADABLE' }),
+    );
+  });
+
+  it('fails closed on an ACL entry it cannot parse', () => {
+    const path = 'C:\\Users\\test\\AppData\\Local\\certkit';
+    const run = (command: string, args: readonly string[]) => {
+      if (command === 'whoami') return '"DOMAIN\\test","S-1-5-21-1-2-3-1001"';
+      if (args.includes('/inheritance:r'))
+        return 'Successfully processed 1 files; Failed processing 0 files';
+      return [
+        `${path} Everyone:unparsed-grant`,
+        '                  DOMAIN\\test:(OI)(CI)(F)',
         'Successfully processed 1 files; Failed processing 0 files',
       ].join('\r\n');
     };

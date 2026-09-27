@@ -505,7 +505,12 @@ export async function withLock<T>(
       ) {
         throw unreadable(path, 'Could not create CA lock', error);
       }
-      await initializedLockRecord(path, guard);
+      try {
+        await initializedLockRecord(path, guard);
+      } catch (error) {
+        if (error instanceof CertkitError && isMissing(error.cause)) continue;
+        throw error;
+      }
       const remaining = deadline - Date.now();
       if (remaining <= 0) {
         throw unreadable(
@@ -524,15 +529,19 @@ export async function withLock<T>(
     operation = { ok: false, error };
   }
   let releaseError: unknown;
+  let closed = false;
   try {
     closeSync(fd);
+    closed = true;
   } catch (error) {
     releaseError = error;
   }
-  try {
-    unlinkSync(path);
-  } catch (error) {
-    releaseError ??= error;
+  if (closed) {
+    try {
+      unlinkSync(path);
+    } catch (error) {
+      releaseError ??= error;
+    }
   }
   if (releaseError !== undefined)
     throw unreadable(path, 'Could not release CA lock', releaseError);

@@ -52,25 +52,51 @@ function identity(runCommand: CommandRunner): { account: string; sid: string } {
 }
 
 function aclPrincipals(path: string, output: string): string[] {
-  const pathPrefix = path
-    .replaceAll('/', '\\')
-    .replace(/\\+$/, '')
-    .toLowerCase();
-  return output
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .flatMap((line) => {
-      const marker = line.indexOf(':(');
-      if (marker < 0) return [];
-      let principal = line.slice(0, marker).trim();
-      const lowerLine = principal.toLowerCase();
-      if (lowerLine.startsWith(pathPrefix)) {
-        const suffix = principal.slice(pathPrefix.length);
-        if (!suffix || !/^\s/.test(suffix)) return [];
-        principal = suffix.trim();
+  const normalizedPath = path.replaceAll('/', '\\').toLowerCase();
+  const pathPrefix = /^[a-z]:\\$/i.test(normalizedPath)
+    ? normalizedPath
+    : normalizedPath.replace(/\\+$/, '');
+  const principals: string[] = [];
+
+  for (const rawLine of output.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    const marker = line.indexOf(':(');
+    if (marker < 0) {
+      const isPathHeader =
+        line.replaceAll('/', '\\').toLowerCase() === normalizedPath;
+      if (!isPathHeader && (line.includes(':') || /[()]/.test(line))) {
+        throw new CertkitError(
+          'CA_UNREADABLE',
+          `Could not parse a Windows ACL entry for ${path}: ${line}`,
+        );
       }
-      return principal ? [principal.toLowerCase()] : [];
-    });
+      continue;
+    }
+
+    const rights = line.slice(marker + 1);
+    if (!/^(?:\([^()\r\n]+\))+$/.test(rights)) {
+      throw new CertkitError(
+        'CA_UNREADABLE',
+        `Could not parse a Windows ACL entry for ${path}: ${line}`,
+      );
+    }
+    let principal = line.slice(0, marker).trim();
+    const principalPrefix = principal.replaceAll('/', '\\').toLowerCase();
+    if (principalPrefix.startsWith(pathPrefix)) {
+      const suffix = principal.slice(pathPrefix.length);
+      const driveRoot = /^[a-z]:\\$/i.test(pathPrefix);
+      if (driveRoot || /^\s/.test(suffix)) principal = suffix.trim();
+    }
+    if (!principal) {
+      throw new CertkitError(
+        'CA_UNREADABLE',
+        `Could not parse a Windows ACL principal for ${path}: ${line}`,
+      );
+    }
+    principals.push(principal.toLowerCase());
+  }
+  return principals;
 }
 
 function verifyAcl(path: string, runCommand: CommandRunner): void {
@@ -91,19 +117,7 @@ function verifyAcl(path: string, runCommand: CommandRunner): void {
     `*${current.sid}`.toLowerCase(),
     current.sid.toLowerCase(),
   ]);
-  const systemDefaults = new Set([
-    'nt authority\\system',
-    'system',
-    'builtin\\administrators',
-    'administrators',
-    '*s-1-5-18',
-    's-1-5-18',
-    '*s-1-5-32-544',
-    's-1-5-32-544',
-  ]);
-  const unapproved = principals.filter(
-    (principal) => !self.has(principal) && !systemDefaults.has(principal),
-  );
+  const unapproved = principals.filter((principal) => !self.has(principal));
   if (!principals.length || unapproved.length > 0) {
     const command = unapproved.length
       ? unapproved
