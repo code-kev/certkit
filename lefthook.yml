@@ -1,0 +1,4 @@
+pre-commit:
+  commands:
+    biome:
+      run: pnpm exec biome check --no-errors-on-unmatched {staged_files}

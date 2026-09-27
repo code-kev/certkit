@@ -1,0 +1,64 @@
+{
+  "name": "certkit",
+  "version": "0.0.0",
+  "description": "Trusted local HTTPS development certificates",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22.15.0"
+  },
+  "packageManager": "pnpm@10.34.5",
+  "sideEffects": [
+    "./dist/reflect-metadata.js"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./vite": {
+      "types": "./dist/integrations/vite.d.ts",
+      "default": "./dist/integrations/vite.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "certkit": "./dist/cli/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsdown",
+    "test": "vitest run",
+    "coverage": "vitest run --coverage",
+    "commitlint": "commitlint",
+    "lint": "biome check . && depcruise src --config dependency-cruiser.config.mjs && knip && pnpm deps:check",
+    "typecheck": "tsc --noEmit",
+    "deps:check": "node scripts/check-deps.mjs"
+  },
+  "dependencies": {
+    "@expo/sudo-prompt": "9.3.2",
+    "@peculiar/x509": "2.1.0",
+    "citty": "0.2.2",
+    "picocolors": "1.1.1"
+  },
+  "devDependencies": {
+    "@arethetypeswrong/core": "0.18.5",
+    "@biomejs/biome": "2.5.14",
+    "@changesets/cli": "2.29.7",
+    "@commitlint/cli": "21.2.3",
+    "@commitlint/config-conventional": "21.2.3",
+    "@tsconfig/node22": "22.0.6",
+    "@tsconfig/strictest": "2.0.8",
+    "@types/node": "26.6.2",
+    "@vitest/coverage-v8": "5.0.1",
+    "dependency-cruiser": "18.4.0",
+    "knip": "6.37.0",
+    "lefthook": "2.1.14",
+    "publint": "0.3.24",
+    "tsdown": "0.23.0",
+    "typescript": "7.0.2",
+    "vitest": "5.0.1"
+  }
+}
