@@ -361,7 +361,8 @@ function writePrivateKeyAtomic(
 function replaceFile(tempPath: string, path: string): void {
   try {
     const stat = lstatSync(path);
-    if (stat.isSymbolicLink()) unlinkSync(path);
+    if (stat.isSymbolicLink())
+      throw unreadable(path, 'Write target is a symbolic link');
     else if (!stat.isFile())
       throw unreadable(path, 'Write target is not a regular file');
   } catch (error) {

@@ -5,6 +5,7 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -13,19 +14,43 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   type FsGuard,
-  readState,
-  withLock,
-  writeStateAtomic,
+  readState as readStateCore,
+  withLock as withLockCore,
+  writeStateAtomic as writeStateAtomicCore,
 } from '../../src/core/cadir.js';
 import {
   certificateFor as certificateForCore,
   certificateForLocked,
 } from '../../src/core/certificate.js';
 import { caDir, certificateFor } from '../../src/index.js';
+import { createWindowsFsGuard } from '../../src/platforms/fsguard.js';
 
 const DAY_MS = 86_400_000;
 let tempRoot = '';
 let dir = '';
+
+function fileOptions(fsGuard?: FsGuard): { fsGuard?: FsGuard } {
+  return process.platform === 'win32'
+    ? { fsGuard: fsGuard ?? createWindowsFsGuard() }
+    : fsGuard
+      ? { fsGuard }
+      : {};
+}
+
+function readState(path: string) {
+  return readStateCore(path, fileOptions());
+}
+
+function writeStateAtomic(
+  path: string,
+  state: Parameters<typeof writeStateAtomicCore>[1],
+): void {
+  writeStateAtomicCore(path, state, fileOptions());
+}
+
+function withLock<T>(path: string, operation: () => Promise<T>): Promise<T> {
+  return withLockCore(path, operation, fileOptions());
+}
 
 function cacheFiles() {
   const files = readdirSync(dir);
@@ -259,6 +284,24 @@ describe('certificateFor', () => {
     expect(second.key).not.toBe(other.key);
   });
 
+  it.skipIf(process.platform === 'win32')(
+    'preserves a symlinked leaf cache target and fails closed',
+    async () => {
+      await certificateFor(['localhost'], { caDir: dir });
+      const files = cacheFiles();
+      const sentinel = join(tempRoot, 'sentinel.pem');
+      writeFileSync(sentinel, 'outside bytes', { mode: 0o600 });
+      unlinkSync(files.cert);
+      symlinkSync(sentinel, files.cert);
+
+      await expect(
+        certificateFor(['localhost'], { caDir: dir }),
+      ).rejects.toMatchObject({ code: 'CA_UNREADABLE' });
+      expect(lstatSync(files.cert).isSymbolicLink()).toBe(true);
+      expect(readFileSync(sentinel, 'utf8')).toBe('outside bytes');
+    },
+  );
+
   it.each(['ca-key.pem', 'ca-cert.pem'])(
     'fails closed and preserves CA files when %s is corrupt',
     async (filename) => {
@@ -326,7 +369,7 @@ describe('certificateFor', () => {
       certificateForLocked(
         [{ kind: 'dns', ascii: 'localhost' }],
         { validityDays: 825 },
-        { dir },
+        { dir, ...fileOptions() },
       ),
     );
 
