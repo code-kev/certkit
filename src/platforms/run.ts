@@ -44,16 +44,11 @@ export async function run(
       code?: string | number;
     };
     if (controller.signal.aborted)
-      throw new Error(`Command timed out after ${timeout} ms: ${argv[0]}`, {
-        cause: error,
-      });
+      throw new Error(`Command timed out after ${timeout} ms.`);
     if (failure.code === 'ENOENT')
       throw new CertkitError(
         'UNSUPPORTED_PLATFORM',
-        `Command not found: ${argv[0]}`,
-        {
-          cause: error,
-        },
+        `Command not found: ${redact(argv[0])}`,
       );
     if (typeof failure.code === 'number')
       return {
@@ -61,7 +56,7 @@ export async function run(
         stdout: redact(failure.stdout ?? ''),
         stderr: redact(failure.stderr ?? ''),
       };
-    throw error;
+    throw new Error(`Command failed: ${redact(argv[0])}`);
   } finally {
     if (timer) clearTimeout(timer);
   }
