@@ -1,5 +1,5 @@
 import { type CommandDef, defineCommand } from 'citty';
-import { cliVersion, jsonOutput, loadApi } from '../options.js';
+import { jsonOutput, loadApi } from '../options.js';
 
 type Args = {
   json: { type: 'boolean'; description: 'Print JSON' };
@@ -25,9 +25,7 @@ export const carootCommand: CommandDef<Args> = defineCommand({
     const { caDir } = await loadApi();
     const path = caDir();
     if (jsonOutput || args.json) {
-      console.log(
-        JSON.stringify({ schemaVersion: 1, version: cliVersion, caDir: path }),
-      );
+      console.log(JSON.stringify({ schemaVersion: 1, caDir: path }));
     } else {
       console.log(path);
     }

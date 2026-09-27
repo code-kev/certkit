@@ -27,7 +27,7 @@ const main = defineCommand({
 
 const rawArgs = process.argv.slice(2);
 const commandName = rawArgs.find((arg) => !arg.startsWith('-'));
-if (commandName && !(commandName in commands)) {
+if (commandName && !Object.hasOwn(commands, commandName)) {
   process.stderr.write(
     `${await renderUsage(main)}\nUnknown command: ${commandName}\n`,
   );

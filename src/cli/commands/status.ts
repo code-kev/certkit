@@ -1,5 +1,5 @@
 import { type CommandDef, defineCommand } from 'citty';
-import { cliVersion, colors, jsonOutput, loadApi } from '../options.js';
+import { colors, jsonOutput, loadApi } from '../options.js';
 
 type Args = {
   json: { type: 'boolean'; description: 'Print JSON' };
@@ -26,9 +26,7 @@ export const statusCommand: CommandDef<Args> = defineCommand({
       const { status } = await loadApi();
       const report = await status();
       if (jsonOutput || args.json) {
-        console.log(
-          JSON.stringify({ schemaVersion: 1, version: cliVersion, ...report }),
-        );
+        console.log(JSON.stringify({ schemaVersion: 1, ...report }));
       } else {
         const pc = colors(args.color);
         console.log(`CA directory: ${report.caDir}`);
@@ -59,7 +57,6 @@ export const statusCommand: CommandDef<Args> = defineCommand({
           console.log(
             JSON.stringify({
               schemaVersion: 1,
-              version: cliVersion,
               error: {
                 code,
                 message: error.message,

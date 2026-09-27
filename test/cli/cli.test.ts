@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -31,16 +31,11 @@ describe('CLI skeleton', () => {
     const result = await run([process.execPath, cli, 'caroot', '--json']);
     const output = JSON.parse(result.stdout) as {
       schemaVersion: number;
-      version: string;
       caDir: string;
     };
 
     expect(result.code).toBe(0);
-    expect(output).toMatchObject({ schemaVersion: 1, caDir });
-    expect(output.version).toBe(
-      (await import('../../package.json', { with: { type: 'json' } })).default
-        .version,
-    );
+    expect(output).toEqual({ schemaVersion: 1, caDir });
     expect(existsSync(caDir)).toBe(false);
     rmSync(root, { recursive: true, force: true });
   });
@@ -68,27 +63,46 @@ describe('CLI skeleton', () => {
     rmSync(root, { recursive: true, force: true });
   });
 
-  it('prints status JSON with stores and package version', async () => {
+  it('prints status JSON with exactly the report fields and schema version', async () => {
     const root = mkdtempSync(join(tmpdir(), 'certkit-cli-status-json-'));
     process.env.CERTKIT_HOME = join(root, 'ca');
     const result = await run([process.execPath, cli, '--json', 'status']);
     const output = JSON.parse(result.stdout) as {
       schemaVersion: number;
-      version: string;
+      caDir: string;
+      ca: null | { subject: string; serial: string; expiresAt: string };
       stores: Array<{ state: string }>;
     };
 
     expect(result.code).toBe(
       output.stores.some((store) => store.state === 'untrusted') ? 1 : 0,
     );
-    expect(output).toMatchObject({
-      schemaVersion: 1,
-      stores: expect.any(Array),
-    });
-    expect(output.version).toBe(
-      (await import('../../package.json', { with: { type: 'json' } })).default
-        .version,
-    );
+    expect(Object.keys(output).sort()).toEqual([
+      'ca',
+      'caDir',
+      'schemaVersion',
+      'stores',
+    ]);
+    expect(output.schemaVersion).toBe(1);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('prints status errors with only the error schema fields', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'certkit-cli-status-error-'));
+    const caPath = join(root, 'not-a-directory');
+    writeFileSync(caPath, '');
+    process.env.CERTKIT_HOME = caPath;
+    const result = await run([process.execPath, cli, 'status', '--json']);
+    const output = JSON.parse(result.stdout) as {
+      schemaVersion: number;
+      error: { code: string; message: string };
+    };
+
+    expect(result.code).toBe(1);
+    expect(Object.keys(output).sort()).toEqual(['error', 'schemaVersion']);
+    expect(Object.keys(output.error).sort()).toEqual(['code', 'message']);
+    expect(output.schemaVersion).toBe(1);
+    expect(output.error.code).toBe('CA_UNREADABLE');
     rmSync(root, { recursive: true, force: true });
   });
 
@@ -107,5 +121,13 @@ describe('CLI skeleton', () => {
     expect(result.stdout).toBe('');
     expect(result.stderr).toContain('USAGE');
     expect(result.stderr).toContain('caroot');
+  });
+
+  it('treats inherited object keys as unknown commands', async () => {
+    const result = await run([process.execPath, cli, 'constructor']);
+    expect(result.code).toBe(2);
+    expect(result.stdout).toBe('');
+    expect(result.stderr).toContain('USAGE');
+    expect(result.stderr).toContain('Unknown command: constructor');
   });
 });
