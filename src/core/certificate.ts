@@ -52,6 +52,11 @@ export interface CertificateBundle {
   readonly caCert: string;
 }
 
+export interface CaStatusMaterial {
+  readonly state: StateFile;
+  readonly certPem: string;
+}
+
 interface LockedContext extends FileOptions {
   dir: string;
 }
@@ -591,6 +596,30 @@ async function loadCa(
   removeProtectedFile(dir, 'ca-key.pem', 'Interrupted CA material', fsGuard);
   removeProtectedFile(dir, 'ca-cert.pem', 'Interrupted CA material', fsGuard);
   return createCa(dir, fsGuard);
+}
+
+export function readCaForStatus(
+  dir: string,
+  options: FileOptions = {},
+): CaStatusMaterial | null {
+  const state = readState(dir, options);
+  if (!state) {
+    if (existingEntry(dir, 'ca-key.pem') || existingEntry(dir, 'ca-cert.pem'))
+      throw unreadable(dir, 'CA material exists without a state file');
+    return null;
+  }
+  if (state.phase === 'retiring') {
+    throw new CertkitError(
+      'CA_UNREADABLE',
+      'CA retirement is in progress; resume it with `certkit uninstall`.',
+    );
+  }
+  const keyPem = readCaFile(dir, 'ca-key.pem', options.fsGuard);
+  const certPem = readCaFile(dir, 'ca-cert.pem', options.fsGuard);
+  if (!keyPem || !certPem)
+    throw unreadable(dir, 'CA key or certificate is missing');
+  validatedCa(state, keyPem, certPem, dir);
+  return { state, certPem };
 }
 
 export function caDir(options?: Pick<CertificateOptions, 'caDir'>): string {
