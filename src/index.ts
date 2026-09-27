@@ -60,6 +60,8 @@ export async function status(
       material?.state.pendingWrites.filter(
         (write) => write.store === detectedStore.store,
       ) ?? [];
+    const targets =
+      detectedStore.store === 'nss' ? (detectedStore.targets ?? []) : [];
     const entries: Array<{
       state: StatusReport['stores'][number]['state'];
       target?: string;
@@ -67,19 +69,29 @@ export async function status(
     }> = material
       ? adapterResults.length
         ? adapterResults
-        : pendingWrites.length
-          ? pendingWrites.map((write) => ({
-              state: 'unknown' as const,
-              target: write.target,
+        : targets.length
+          ? targets.map((target) => ({
+              state: 'not-detected' as const,
+              target,
             }))
           : [{ state: 'not-detected' as const }]
-      : [
-          {
-            state: detectedStore.detected
-              ? ('untrusted' as const)
-              : ('not-detected' as const),
-          },
-        ];
+      : targets.length
+        ? targets.map((target) => ({
+            state: 'untrusted' as const,
+            target,
+          }))
+        : [
+            {
+              state: detectedStore.detected
+                ? ('untrusted' as const)
+                : ('not-detected' as const),
+            },
+          ];
+
+    for (const write of pendingWrites) {
+      if (!entries.some((entry) => entry.target === write.target))
+        entries.push({ state: 'unknown', target: write.target });
+    }
 
     for (const entry of entries) {
       const target = entry.target;

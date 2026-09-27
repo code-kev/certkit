@@ -40,9 +40,45 @@ vi.mock('../src/platforms/macos.js', () => ({
 vi.mock('../src/platforms/run.js', () => ({ run: vi.fn() }));
 
 let root = '';
+const nssTargets = [
+  '/home/test/.pki/nssdb',
+  '/home/test/.mozilla/firefox/profile.default',
+];
+
+function detectLinuxNss(targets: string[] = nssTargets): void {
+  vi.mocked(detect).mockResolvedValue({
+    os: 'linux',
+    wsl: false,
+    stores: [
+      { store: 'macos-keychain', detected: false },
+      { store: 'windows-root', detected: false },
+      { store: 'linux-system', detected: false },
+      {
+        store: 'nss',
+        detected: targets.length > 0,
+        targets,
+        installTargets: [],
+      },
+    ],
+  });
+}
+
+function detectMacos(): void {
+  vi.mocked(detect).mockResolvedValue({
+    os: 'macos',
+    wsl: false,
+    stores: [
+      { store: 'macos-keychain', detected: true },
+      { store: 'windows-root', detected: false },
+      { store: 'linux-system', detected: false },
+      { store: 'nss', detected: false, targets: [], installTargets: [] },
+    ],
+  });
+}
 
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'certkit-status-'));
+  detectMacos();
   mockMacosCheckTrust.mockResolvedValue([
     { state: 'unknown', target: 'default', detail: 'probe inconclusive' },
   ]);
@@ -56,15 +92,20 @@ afterEach(() => {
 describe('status', () => {
   it('reports detected stores untrusted without creating a missing CA directory', async () => {
     const caDir = join(root, 'missing-ca');
+    detectLinuxNss();
 
     await expect(status({ caDir })).resolves.toEqual({
       caDir,
       ca: null,
       stores: [
-        { store: 'macos-keychain', state: 'untrusted' },
+        { store: 'macos-keychain', state: 'not-detected' },
         { store: 'windows-root', state: 'not-detected' },
         { store: 'linux-system', state: 'not-detected' },
-        { store: 'nss', state: 'not-detected' },
+        ...nssTargets.map((target) => ({
+          store: 'nss',
+          state: 'untrusted',
+          target,
+        })),
       ],
     });
     expect(existsSync(caDir)).toBe(false);
@@ -167,7 +208,28 @@ describe('status', () => {
     expect(readFileSync(keyPath, 'utf8')).toBe('broken');
   });
 
-  it('reports a detected store without an adapter as not-detected without running commands', async () => {
+  it('reports every detected NSS database without an adapter', async () => {
+    const caDir = join(root, 'ca');
+    await certificateFor(['localhost'], { caDir });
+    detectLinuxNss();
+
+    await expect(status({ caDir })).resolves.toMatchObject({
+      stores: [
+        { store: 'macos-keychain', state: 'not-detected' },
+        { store: 'windows-root', state: 'not-detected' },
+        { store: 'linux-system', state: 'not-detected' },
+        ...nssTargets.map((target) => ({
+          store: 'nss',
+          state: 'not-detected',
+          target,
+        })),
+      ],
+    });
+    expect(run).not.toHaveBeenCalled();
+    expect(createMacosAdapter).not.toHaveBeenCalled();
+  });
+
+  it('keeps other detected NSS databases when one target has a pending write', async () => {
     const caDir = join(root, 'ca');
     await certificateFor(['localhost'], { caDir });
     const statePath = join(caDir, 'state.json');
@@ -177,27 +239,13 @@ describe('status', () => {
     state.pendingWrites = [
       {
         store: 'nss',
-        target: '/home/test/.pki/nssdb',
+        target: nssTargets[0],
         sha256: 'b'.repeat(64),
         timestamp: new Date().toISOString(),
       },
     ];
     writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`);
-    vi.mocked(detect).mockResolvedValue({
-      os: 'linux',
-      wsl: false,
-      stores: [
-        { store: 'macos-keychain', detected: false },
-        { store: 'windows-root', detected: false },
-        { store: 'linux-system', detected: true },
-        {
-          store: 'nss',
-          detected: true,
-          targets: ['/home/test/.pki/nssdb'],
-          installTargets: [],
-        },
-      ],
-    });
+    detectLinuxNss();
 
     await expect(status({ caDir })).resolves.toMatchObject({
       stores: [
@@ -207,12 +255,51 @@ describe('status', () => {
         {
           store: 'nss',
           state: 'unknown',
-          target: '/home/test/.pki/nssdb',
+          target: nssTargets[0],
           detail: 'Trust write outcome is unresolved.',
         },
+        { store: 'nss', state: 'not-detected', target: nssTargets[1] },
       ],
     });
     expect(run).not.toHaveBeenCalled();
     expect(createMacosAdapter).not.toHaveBeenCalled();
+  });
+
+  it('reports pending NSS targets that are no longer detected', async () => {
+    const caDir = join(root, 'ca');
+    await certificateFor(['localhost'], { caDir });
+    const statePath = join(caDir, 'state.json');
+    const state = JSON.parse(readFileSync(statePath, 'utf8')) as {
+      pendingWrites: unknown[];
+    };
+    state.pendingWrites = [
+      {
+        store: 'nss',
+        target: '/home/test/removed-profile',
+        sha256: 'c'.repeat(64),
+        timestamp: new Date().toISOString(),
+      },
+    ];
+    writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`);
+    detectLinuxNss();
+
+    await expect(status({ caDir })).resolves.toMatchObject({
+      stores: [
+        { store: 'macos-keychain', state: 'not-detected' },
+        { store: 'windows-root', state: 'not-detected' },
+        { store: 'linux-system', state: 'not-detected' },
+        ...nssTargets.map((target) => ({
+          store: 'nss',
+          state: 'not-detected',
+          target,
+        })),
+        {
+          store: 'nss',
+          state: 'unknown',
+          target: '/home/test/removed-profile',
+          detail: 'Trust write outcome is unresolved.',
+        },
+      ],
+    });
   });
 });
