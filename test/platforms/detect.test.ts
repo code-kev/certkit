@@ -1,3 +1,4 @@
+import { constants } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -10,6 +11,7 @@ type Options = {
   platform?: NodeJS.Platform;
   files?: Record<string, string>;
   directories?: string[];
+  readOnly?: string[];
   commands?: string[];
   osRelease?: string;
 };
@@ -17,12 +19,36 @@ type Options = {
 function detector(options: Options = {}) {
   const files = new Map(Object.entries(options.files ?? {}));
   const directories = new Set(options.directories ?? []);
+  const readOnly = new Set(options.readOnly ?? []);
   const touched = new Set<string>();
   const fs = {
-    async access(target: string) {
+    async access(target: string, mode?: number) {
       touched.add(target);
-      if (!files.has(target) && !directories.has(target))
+      if (
+        mode !== undefined &&
+        (mode & constants.W_OK) !== 0 &&
+        readOnly.has(target)
+      )
+        throw new Error('EACCES');
+      if (
+        !files.has(target) &&
+        !directories.has(target) &&
+        ![...files.keys()].some((file) => path.dirname(file) === target)
+      )
         throw new Error('ENOENT');
+    },
+    async stat(target: string) {
+      if (
+        !files.has(target) &&
+        !directories.has(target) &&
+        ![...files.keys()].some((file) => path.dirname(file) === target)
+      )
+        throw new Error('ENOENT');
+      return {
+        isDirectory: () =>
+          directories.has(target) ||
+          [...files.keys()].some((file) => path.dirname(file) === target),
+      };
     },
     async readFile(target: string) {
       touched.add(target);
@@ -97,6 +123,30 @@ describe('environment detection', () => {
       targets: [],
       installTargets: [target],
     });
+  });
+
+  it('keeps read-only Firefox DBs as status targets only', async () => {
+    const base = path.join(home, '.mozilla', 'firefox');
+    const profile = path.join(base, 'readonly.default');
+    const result = await detector({
+      files: {
+        [path.join(base, 'profiles.ini')]:
+          '[Profile0]\nIsRelative=1\nPath=readonly.default\n',
+        [path.join(profile, 'cert9.db')]: '',
+      },
+      readOnly: [profile],
+    }).detect();
+    expect(nss(result)?.targets).toContain(profile);
+    expect(nss(result)?.installTargets).not.toContain(profile);
+  });
+
+  it('ignores a regular file at the legacy Chromium DB path', async () => {
+    const legacy = path.join(home, '.pki', 'nssdb');
+    const result = await detector({ files: { [legacy]: '' } }).detect();
+    expect(nss(result)?.installTargets).not.toContain(legacy);
+    expect(nss(result)?.installTargets).toContain(
+      path.join(xdg, 'pki', 'nssdb'),
+    );
   });
 
   it('honors XDG_DATA_HOME for the prospective Chromium DB', async () => {

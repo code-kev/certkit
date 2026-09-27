@@ -1,6 +1,8 @@
+import { constants } from 'node:fs';
 import {
   access as nodeAccess,
   readFile as nodeReadFile,
+  stat as nodeStat,
 } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
@@ -18,7 +20,10 @@ export interface Environment {
   }>;
 }
 
-type ProbeFs = Pick<typeof import('node:fs/promises'), 'access' | 'readFile'>;
+type ProbeFs = Pick<
+  typeof import('node:fs/promises'),
+  'access' | 'readFile' | 'stat'
+>;
 
 export interface DetectProbes {
   platform?: NodeJS.Platform;
@@ -27,14 +32,26 @@ export interface DetectProbes {
   fs?: ProbeFs;
 }
 
-const exists = async (fs: ProbeFs, target: string): Promise<boolean> => {
+const exists = async (
+  fs: ProbeFs,
+  target: string,
+  mode?: number,
+): Promise<boolean> => {
   try {
-    await fs.access(target);
+    await fs.access(target, mode);
     return true;
   } catch {
     return false;
   }
 };
+
+async function isDirectory(fs: ProbeFs, target: string): Promise<boolean> {
+  try {
+    return (await fs.stat(target)).isDirectory();
+  } catch {
+    return false;
+  }
+}
 
 async function hasNssDb(fs: ProbeFs, target: string): Promise<boolean> {
   return (
@@ -85,7 +102,11 @@ export async function detect(probes: DetectProbes = {}): Promise<Environment> {
       : platform === 'win32'
         ? 'windows'
         : 'linux';
-  const fs = probes.fs ?? { access: nodeAccess, readFile: nodeReadFile };
+  const fs = probes.fs ?? {
+    access: nodeAccess,
+    readFile: nodeReadFile,
+    stat: nodeStat,
+  };
   const which =
     probes.which ??
     (async (command: string) => {
@@ -183,7 +204,7 @@ export async function detect(probes: DetectProbes = {}): Promise<Environment> {
   let chromiumProspect: string | undefined;
   if (os === 'linux') {
     const legacy = pathApi.join(home, '.pki', 'nssdb');
-    chromiumProspect = (await exists(fs, legacy))
+    chromiumProspect = (await isDirectory(fs, legacy))
       ? legacy
       : pathApi.join(
           process.env['XDG_DATA_HOME'] || pathApi.join(home, '.local', 'share'),
@@ -200,10 +221,15 @@ export async function detect(probes: DetectProbes = {}): Promise<Environment> {
   }
 
   const uniqueTargets = [...new Set(targets)];
-  const installTargets = uniqueTargets.filter(
-    (target) => target !== '/etc/pki/nssdb',
-  );
-  if (chromiumProspect && !installTargets.includes(chromiumProspect))
+  const installTargets: string[] = [];
+  for (const target of uniqueTargets) {
+    if (
+      target !== '/etc/pki/nssdb' &&
+      (await exists(fs, target, constants.W_OK | constants.X_OK))
+    )
+      installTargets.push(target);
+  }
+  if (chromiumProspect && !uniqueTargets.includes(chromiumProspect))
     installTargets.push(chromiumProspect);
   stores.push({
     store: 'nss',
