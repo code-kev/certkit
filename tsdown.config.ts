@@ -8,6 +8,7 @@ export default defineConfig({
     'reflect-metadata': 'src/reflect-metadata.ts',
   },
   dts: true,
+  deps: { neverBundle: ['./reflect-metadata.js'] },
   fixedExtension: false,
   publint: true,
   attw: true,
