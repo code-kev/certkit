@@ -451,6 +451,13 @@ function lockRemovalCommand(path: string): string {
   return `rm -- '${path.replaceAll("'", "'\\''")}'`;
 }
 
+function lockTimeout(path: string): CertkitError {
+  return unreadable(
+    path,
+    `Timed out waiting for the CA lock. After confirming no Certkit process is running, remove it manually with: ${lockRemovalCommand(path)}`,
+  );
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -508,15 +515,17 @@ export async function withLock<T>(
       try {
         await initializedLockRecord(path, guard);
       } catch (error) {
-        if (error instanceof CertkitError && isMissing(error.cause)) continue;
+        if (error instanceof CertkitError && isMissing(error.cause)) {
+          const remaining = deadline - Date.now();
+          if (remaining <= 0) throw lockTimeout(path);
+          await sleep(Math.min(50, remaining));
+          continue;
+        }
         throw error;
       }
       const remaining = deadline - Date.now();
       if (remaining <= 0) {
-        throw unreadable(
-          path,
-          `Timed out waiting for the CA lock. After confirming no Certkit process is running, remove it manually with: ${lockRemovalCommand(path)}`,
-        );
+        throw lockTimeout(path);
       }
       await sleep(Math.min(50, remaining));
     }

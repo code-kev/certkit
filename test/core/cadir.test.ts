@@ -493,6 +493,73 @@ describe('CA directory lock', () => {
     expect(existsSync(lockPath)).toBe(false);
   });
 
+  it('bounds repeated lock-disappearance retries by the configured timeout', async () => {
+    const dir = join(tempRoot, 'ca');
+    mkdirSync(dir, { mode: 0o700 });
+    const lockPath = join(dir, '.lock');
+    const foreignPid = process.pid + 1;
+    const timeoutMs = 30;
+    const churnMs = 120;
+    const startedAt = Date.now();
+    let replacedLocks = 0;
+    const writeContendedLock = () =>
+      writeFileSync(
+        lockPath,
+        JSON.stringify({
+          pid: foreignPid,
+          startedAt: new Date().toISOString(),
+        }),
+        { mode: 0o600 },
+      );
+    let removedLocks = 0;
+    const open = fs.openSync;
+    fs.openSync = ((path, flags, mode) => {
+      if (
+        path === lockPath &&
+        flags === 'wx' &&
+        Date.now() - startedAt < churnMs &&
+        !existsSync(lockPath)
+      ) {
+        replacedLocks += 1;
+        writeContendedLock();
+      }
+      return open(path, flags, mode);
+    }) as typeof fs.openSync;
+    syncBuiltinESMExports();
+    const guard: FsGuard = {
+      protectDirectory: () => undefined,
+      assertProtectedDirectory: () => undefined,
+      assertProtectedFile: (path) => {
+        if (path !== lockPath) return;
+        const record = JSON.parse(readFileSync(path, 'utf8')) as {
+          pid: number;
+        };
+        if (record.pid !== foreignPid) return;
+        removedLocks += 1;
+        rmSync(path);
+      },
+    };
+
+    try {
+      await expect(
+        withLock(dir, async () => 'acquired', {
+          fsGuard: guard,
+          timeoutMs,
+        }),
+      ).rejects.toMatchObject({
+        code: 'CA_UNREADABLE',
+        message: expect.stringContaining('Timed out waiting for the CA lock'),
+      });
+      expect(replacedLocks).toBeGreaterThan(1);
+      expect(removedLocks).toBe(replacedLocks);
+      expect(Date.now() - startedAt).toBeLessThan(timeoutMs * 3);
+    } finally {
+      fs.openSync = open;
+      syncBuiltinESMExports();
+      rmSync(lockPath, { force: true });
+    }
+  });
+
   it('keeps the lock if closing its descriptor fails', async () => {
     const dir = join(tempRoot, 'ca');
     const close = fs.closeSync;
@@ -669,6 +736,24 @@ describe('Windows ACL guard', () => {
         return 'Successfully processed 1 files; Failed processing 0 files';
       return [
         `${path} Everyone:unparsed-grant`,
+        '                  DOMAIN\\test:(OI)(CI)(F)',
+        'Successfully processed 1 files; Failed processing 0 files',
+      ].join('\r\n');
+    };
+    const guard = createWindowsFsGuard(run);
+    expect(() => guard.protectDirectory(path)).toThrowError(
+      expect.objectContaining({ code: 'CA_UNREADABLE' }),
+    );
+  });
+
+  it('fails closed on an unrecognized nonempty ACL line', () => {
+    const path = 'C:\\Users\\test\\AppData\\Local\\certkit';
+    const run = (command: string, args: readonly string[]) => {
+      if (command === 'whoami') return '"DOMAIN\\test","S-1-5-21-1-2-3-1001"';
+      if (args.includes('/inheritance:r'))
+        return 'Successfully processed 1 files; Failed processing 0 files';
+      return [
+        'Everyone F',
         '                  DOMAIN\\test:(OI)(CI)(F)',
         'Successfully processed 1 files; Failed processing 0 files',
       ].join('\r\n');

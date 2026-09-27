@@ -63,9 +63,16 @@ function aclPrincipals(path: string, output: string): string[] {
     if (!line) continue;
     const marker = line.indexOf(':(');
     if (marker < 0) {
-      const isPathHeader =
-        line.replaceAll('/', '\\').toLowerCase() === normalizedPath;
-      if (!isPathHeader && (line.includes(':') || /[()]/.test(line))) {
+      const linePath = line
+        .replaceAll('/', '\\')
+        .replace(/\\+$/, '')
+        .toLowerCase();
+      const isPathHeader = linePath === normalizedPath.replace(/\\+$/, '');
+      const isSuccessFooter =
+        /^Successfully processed \d+ files?; Failed processing 0 files?$/i.test(
+          line,
+        );
+      if (!isPathHeader && !isSuccessFooter) {
         throw new CertkitError(
           'CA_UNREADABLE',
           `Could not parse a Windows ACL entry for ${path}: ${line}`,
