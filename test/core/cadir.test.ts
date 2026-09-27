@@ -144,6 +144,8 @@ function runLockWorker(dir: string, id: string): Promise<number> {
   );
   const testFile = fileURLToPath(import.meta.url);
   return new Promise((resolve, reject) => {
+    let stdout = '';
+    let stderr = '';
     const child = spawn(
       process.execPath,
       [
@@ -162,11 +164,24 @@ function runLockWorker(dir: string, id: string): Promise<number> {
           CERTKIT_LOCK_RACE_DIR: dir,
           CERTKIT_LOCK_RACE_ID: id,
         },
-        stdio: 'ignore',
+        stdio: ['ignore', 'pipe', 'pipe'],
       },
     );
+    child.stdout?.on('data', (chunk: Buffer) => {
+      stdout += chunk.toString();
+    });
+    child.stderr?.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString();
+    });
     child.once('error', reject);
-    child.once('close', (code) => resolve(code ?? 1));
+    child.once('close', (code) => {
+      if (code !== 0) {
+        console.error(
+          `Lock worker ${id} exited ${code ?? 'without a code'}\nstdout:\n${stdout}\nstderr:\n${stderr}`,
+        );
+      }
+      resolve(code ?? 1);
+    });
   });
 }
 
@@ -420,6 +435,33 @@ describe('CA directory lock', () => {
     releaseLock();
     await holder;
     expect(existsSync(join(dir, '.lock'))).toBe(false);
+  });
+
+  it('waits for a nonempty lock record to finish before treating it as malformed', async () => {
+    const dir = join(tempRoot, 'ca');
+    mkdirSync(dir, { mode: 0o700 });
+    const lockPath = join(dir, '.lock');
+    const record = {
+      pid: process.pid + 10_000,
+      startedAt: new Date().toISOString(),
+    };
+    writeFileSync(lockPath, '{"pid":', { mode: 0o600 });
+    const completion = setTimeout(() => {
+      writeFileSync(lockPath, `${JSON.stringify(record)}\n`);
+    }, 5);
+
+    try {
+      await expect(
+        withLock(dir, async () => 'acquired', { timeoutMs: 80 }),
+      ).rejects.toMatchObject({
+        code: 'CA_UNREADABLE',
+        message: expect.stringContaining('Timed out waiting for the CA lock'),
+      });
+      expect(JSON.parse(readFileSync(lockPath, 'utf8'))).toEqual(record);
+    } finally {
+      clearTimeout(completion);
+      rmSync(lockPath, { force: true });
+    }
   });
 
   it('never removes a stale lock and rejects malformed lock contents', async () => {

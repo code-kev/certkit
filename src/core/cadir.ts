@@ -60,6 +60,8 @@ interface LockFile {
   startedAt: string;
 }
 
+class IncompleteLockRecordError extends Error {}
+
 interface UnknownWriteRecord {
   store?: unknown;
   target?: unknown;
@@ -401,11 +403,21 @@ export function writePrivateKey(
 function lockRecord(path: string, guard?: FsGuard): LockFile {
   inspectPath(path, 'file');
   if (guard) callGuard(() => guard.assertProtectedFile(path), path);
-  let value: unknown;
+  let contents: string;
   try {
-    value = JSON.parse(readFileSync(path, 'utf8')) as unknown;
+    contents = readFileSync(path, 'utf8');
   } catch (error) {
     throw unreadable(path, 'CA lock is unreadable or malformed', error);
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(contents) as unknown;
+  } catch (error) {
+    const cause =
+      error instanceof SyntaxError && !contents.endsWith('\n')
+        ? new IncompleteLockRecordError(error.message)
+        : error;
+    throw unreadable(path, 'CA lock is unreadable or malformed', cause);
   }
   if (!isRecord(value))
     throw unreadable(path, 'CA lock is unreadable or malformed');
@@ -424,20 +436,21 @@ function lockRecord(path: string, guard?: FsGuard): LockFile {
 async function initializedLockRecord(
   path: string,
   guard?: FsGuard,
+  deadline = Date.now() + 15_000,
 ): Promise<LockFile> {
-  const graceDeadline = Date.now() + 250;
+  const graceDeadline = Math.min(Date.now() + 250, deadline);
   for (;;) {
     try {
       return lockRecord(path, guard);
     } catch (error) {
-      if (error instanceof CertkitError && error.cause instanceof SyntaxError) {
-        try {
-          if (lstatSync(path).size === 0 && Date.now() < graceDeadline) {
-            await sleep(5);
-            continue;
-          }
-        } catch {
-          // lockRecord will report the filesystem error on the next loop.
+      if (
+        error instanceof CertkitError &&
+        error.cause instanceof IncompleteLockRecordError
+      ) {
+        const remaining = graceDeadline - Date.now();
+        if (remaining > 0) {
+          await sleep(Math.min(5, remaining));
+          continue;
         }
       }
       throw error;
@@ -484,10 +497,10 @@ export async function withLock<T>(
       fd = openSync(path, 'wx', 0o600);
       writeFileSync(
         fd,
-        JSON.stringify({
+        `${JSON.stringify({
           pid: process.pid,
           startedAt: new Date().toISOString(),
-        }),
+        })}\n`,
         'utf8',
       );
       inspectPath(path, 'file');
@@ -513,7 +526,7 @@ export async function withLock<T>(
         throw unreadable(path, 'Could not create CA lock', error);
       }
       try {
-        await initializedLockRecord(path, guard);
+        await initializedLockRecord(path, guard, deadline);
       } catch (error) {
         if (error instanceof CertkitError && isMissing(error.cause)) {
           const remaining = deadline - Date.now();
