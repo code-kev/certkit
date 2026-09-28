@@ -106,6 +106,12 @@ function storeWriteFailure(message: string): CertkitError {
   return new CertkitError('STORE_WRITE_FAILED', message);
 }
 
+function uninstallRecoveryFailure(message: string): CertkitError {
+  return storeWriteFailure(
+    `${message} Run \`certkit uninstall --dry-run\` for the manual recovery commands.`,
+  );
+}
+
 function assertDefaultTarget(target: string): void {
   if (target !== DEFAULT_TARGET)
     throw storeWriteFailure(
@@ -155,13 +161,13 @@ async function userTrustContains(run: Command, sha1: string): Promise<boolean> {
     if (result.code !== 0) {
       if (NO_TRUST_SETTINGS.test(`${result.stdout}\n${result.stderr}`))
         return false;
-      throw storeWriteFailure(
+      throw uninstallRecoveryFailure(
         'Could not read macOS user trust settings; CA recovery data was retained.',
       );
     }
     const plist = await readFile(exportPath, 'utf8');
     if (!/<plist\b[\s\S]*<dict\b/i.test(plist))
-      throw storeWriteFailure(
+      throw uninstallRecoveryFailure(
         'macOS returned unreadable user trust settings; CA recovery data was retained.',
       );
     return [...plist.matchAll(/<key>\s*([\da-f]{40})\s*<\/key>/gi)].some(
@@ -379,7 +385,7 @@ export function createMacosAdapter(
           certificateHashes(await readFile(caCertPath, 'utf8')).sha256 !==
           identity.sha256
         )
-          throw storeWriteFailure(
+          throw uninstallRecoveryFailure(
             'The macOS CA path does not match the requested fingerprint; CA recovery data was retained.',
           );
 
@@ -389,18 +395,18 @@ export function createMacosAdapter(
           keychainPath,
         );
         if (loginHasCa === undefined)
-          throw storeWriteFailure(
+          throw uninstallRecoveryFailure(
             'Could not read the macOS login keychain; CA recovery data was retained.',
           );
 
         if (await userTrustContains(run, identity.sha1)) {
           const removed = await run(macosRemoveTrustArgv(caCertPath));
           if (removed.code !== 0)
-            throw storeWriteFailure(
+            throw uninstallRecoveryFailure(
               'Could not remove the macOS user trust setting; CA recovery data was retained. macOS may request native user authentication; Certkit never collects a password.',
             );
           if (await userTrustContains(run, identity.sha1))
-            throw storeWriteFailure(
+            throw uninstallRecoveryFailure(
               'The macOS user trust setting remains after removal; CA recovery data was retained.',
             );
         }
@@ -410,20 +416,20 @@ export function createMacosAdapter(
             macosDeleteCertificateArgv(identity.sha256, keychainPath),
           );
           if (deleted.code !== 0)
-            throw storeWriteFailure(
+            throw uninstallRecoveryFailure(
               'Could not delete the CA from the macOS login keychain; CA recovery data was retained. macOS may request native user authentication; Certkit never collects a password.',
             );
           if (
             (await findCertificate(run, identity.sha256, keychainPath)) !==
             false
           )
-            throw storeWriteFailure(
+            throw uninstallRecoveryFailure(
               'The CA remains in the macOS login keychain after deletion; CA recovery data was retained.',
             );
         }
       } catch (error) {
         if (error instanceof CertkitError) throw error;
-        throw storeWriteFailure(
+        throw uninstallRecoveryFailure(
           'Could not complete macOS CA removal; CA recovery data was retained.',
         );
       }

@@ -314,6 +314,54 @@ describe('macOS keychain adapter', () => {
     expect(existsSync(caCertPath)).toBe(true);
   });
 
+  it.each([
+    'trust export',
+    'trust removal',
+    'certificate deletion',
+    'deletion read-back',
+  ])('gives manual recovery guidance after %s fails', async (failure) => {
+    const { ca } = await certificates();
+    const { caCertPath, keychainPath } = await fixture(ca);
+    const sha1 = new X509Certificate(ca).fingerprint
+      .replaceAll(':', '')
+      .toLowerCase();
+    let finds = 0;
+    const instance = adapter(caCertPath, keychainPath, async (argv) => {
+      if (argv[1] === 'find-certificate') {
+        finds++;
+        if (failure === 'deletion read-back' && finds === 2)
+          return result('', 1, 'keychain read failed');
+        return result(ca);
+      }
+      if (argv[1] === 'trust-settings-export') {
+        if (failure === 'trust export')
+          return result('', 1, 'trust settings unavailable');
+        if (failure === 'trust removal') {
+          const outputPath = argv.at(-1);
+          if (!outputPath) throw new Error('missing export path');
+          await writeFile(
+            outputPath,
+            `<plist><dict><key>${sha1}</key><dict/></dict></plist>`,
+          );
+          return result();
+        }
+        return result('', 1, 'No Trust Settings were found');
+      }
+      if (argv[1] === 'remove-trusted-cert')
+        return result('', 1, 'native authentication denied');
+      if (argv[1] === 'delete-certificate')
+        return failure === 'certificate deletion'
+          ? result('', 1, 'native authentication denied')
+          : result();
+      throw new Error(`unexpected command ${argv[1]}`);
+    });
+
+    await expect(instance.uninstall(ca, 'default')).rejects.toMatchObject({
+      code: 'STORE_WRITE_FAILED',
+      message: expect.stringContaining('certkit uninstall --dry-run'),
+    });
+  });
+
   it('removes only user trust and the exact login-keychain fingerprint without search-list membership', async () => {
     const { ca } = await certificates();
     const { caCertPath, keychainPath } = await fixture(ca);
