@@ -8,11 +8,12 @@ import {
   createMacosAdapter,
   macosDeleteCertificateArgv,
   macosInstallArgv,
+  macosLoginKeychainPath,
   macosRemoveTrustArgv,
 } from '../../platforms/macos.js';
 import { run } from '../../platforms/run.js';
 import type { StoreAdapter } from '../../platforms/store.js';
-import { elevate, shQuote } from '../elevate.js';
+import { type elevate, shQuote } from '../elevate.js';
 
 export type TrustStore = StoreAdapter['id'];
 
@@ -52,7 +53,7 @@ export interface TrustResult {
 export interface DryRunCommand {
   store: TrustStore;
   target: string;
-  elevated: string;
+  command: string;
   manual: string;
 }
 
@@ -61,19 +62,12 @@ interface DryRunUncertainty extends TrustTarget {
   detail: string;
 }
 
-function defaultAdapterFactory(
-  caCertPath: string,
-  elevateCommand: typeof elevate = elevate,
-): StoreAdapter[] {
+function defaultAdapterFactory(caCertPath: string): StoreAdapter[] {
   if (process.platform !== 'darwin') return [];
   return [
     createMacosAdapter({
       caCertPath,
       run,
-      elevate: async (argv) => {
-        await elevateCommand(argv);
-        return { code: 0, stdout: '', stderr: '' };
-      },
     }),
   ];
 }
@@ -240,6 +234,10 @@ export function emitResults(results: TrustResult[], json: boolean): void {
       `${result.store} (${result.target}): ${result.state}${detail}${error}`,
     );
   }
+  if (results.some((result) => result.store === 'macos-keychain'))
+    console.log(
+      'macOS may request native user authentication; Certkit never collects a password.',
+    );
 }
 
 export function unsupportedTargetResult(target: TrustTarget): TrustResult {
@@ -269,9 +267,10 @@ export function planInstall(
   return targets.flatMap((target) => {
     if (target.store !== 'macos-keychain' || target.target !== 'default')
       return [];
-    const argv = macosInstallArgv(path);
-    const elevated = argv.map(shQuote).join(' ');
-    return [{ ...target, elevated, manual: `sudo ${elevated}` }];
+    const command = macosInstallArgv(path, macosLoginKeychainPath())
+      .map(shQuote)
+      .join(' ');
+    return [{ ...target, command, manual: command }];
   });
 }
 
@@ -288,10 +287,10 @@ export function planUninstall(
       return [];
     return [
       macosRemoveTrustArgv(path),
-      macosDeleteCertificateArgv(fingerprint),
+      macosDeleteCertificateArgv(fingerprint, macosLoginKeychainPath()),
     ].map((argv) => {
-      const elevated = argv.map(shQuote).join(' ');
-      return { ...target, elevated, manual: `sudo ${elevated}` };
+      const command = argv.map(shQuote).join(' ');
+      return { ...target, command, manual: command };
     });
   });
 }
@@ -326,9 +325,13 @@ export function emitDryRun(
   } else {
     for (const command of commands) {
       console.log(`${command.store} (${command.target})`);
-      console.log(`  elevated: ${command.elevated}`);
+      console.log(`  command: ${command.command}`);
       console.log(`  manual: ${command.manual}`);
     }
+    if (commands.some((command) => command.store === 'macos-keychain'))
+      console.log(
+        'macOS may request native user authentication; Certkit never collects a password.',
+      );
   }
   for (const target of unresolved)
     console.log(
@@ -362,8 +365,7 @@ export function resolveDependencies(
     detect: dependencies.detect ?? detect,
     adapterFactory:
       dependencies.adapterFactory ??
-      ((caCertPath, elevateCommand) =>
-        defaultAdapterFactory(caCertPath, elevateCommand)),
+      ((caCertPath) => defaultAdapterFactory(caCertPath)),
     ...dependencies,
   };
   if (resolved.fsGuard || process.platform !== 'win32') return resolved;

@@ -11,7 +11,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createInstallCommand } from '../../src/cli/commands/install.js';
@@ -25,6 +25,12 @@ import type { StoreAdapter } from '../../src/platforms/store.js';
 
 const roots: string[] = [];
 let previousHome: string | undefined;
+const loginKeychainPath = join(
+  homedir(),
+  'Library',
+  'Keychains',
+  'login.keychain-db',
+);
 
 function fixture(): string {
   const path = mkdtempSync(join(tmpdir(), 'certkit-install-test-'));
@@ -742,7 +748,7 @@ describe('install command', () => {
     expect(adapter.installCalls).toHaveLength(2);
   });
 
-  it('dry-run prints symbolic commands for a fresh home without creating state', async () => {
+  it('dry-run prints a safe user-domain command for a fresh home without creating state', async () => {
     const path = join(fixture(), "ev il'$(touch /tmp/pwned)", 'ca');
     const result = output();
 
@@ -766,11 +772,36 @@ describe('install command', () => {
         {
           store: 'macos-keychain',
           target: 'default',
-          elevated: expect.stringContaining('<ca-cert.pem>'),
-          manual: expect.stringContaining('sudo '),
+          command: expect.stringContaining('<ca-cert.pem>'),
+          manual: expect.stringContaining('<ca-cert.pem>'),
         },
       ],
     });
+    const command = JSON.parse(result.stdout[0] ?? '').commands[0] as {
+      command: string;
+      manual: string;
+    };
+    expect(command.command).toContain(`'-k' '${loginKeychainPath}'`);
+    expect(command.command).not.toContain('sudo ');
+    expect(command.manual).toBe(command.command);
+    expect(command.command).toContain("'<ca-cert.pem>'");
+  });
+
+  it('states that macOS may request native authentication without collecting a password', async () => {
+    const path = join(fixture(), 'ca');
+    const result = output();
+
+    await invoke(
+      createInstallCommand(
+        dependencies(path, macEnvironment(), [fakeAdapter('macos-keychain')]),
+      ),
+      { 'dry-run': true },
+    );
+
+    expect(result.stdout).toContain(
+      'macOS may request native user authentication; Certkit never collects a password.',
+    );
+    expect(existsSync(path)).toBe(false);
   });
 
   it('dry-run reports detected targets outside the registered adapter set', async () => {
@@ -827,9 +858,16 @@ describe('install command', () => {
     );
 
     const commands = JSON.parse(result.stdout[0] ?? '') as {
-      commands: Array<{ elevated: string }>;
+      commands: Array<{ command: string; manual: string }>;
     };
-    expect(commands.commands[0]?.elevated).toContain("'\\''");
+    expect(commands.commands[0]?.command).toContain("'\\''");
+    expect(commands.commands[0]?.command).toContain(
+      `'-k' '${loginKeychainPath}'`,
+    );
+    expect(commands.commands[0]?.command).toContain(
+      shQuote(join(path, 'ca-cert.pem')),
+    );
+    expect(commands.commands[0]?.manual).toBe(commands.commands[0]?.command);
     expect(commands.unresolved).toMatchObject([
       {
         store: 'nss',
@@ -838,6 +876,29 @@ describe('install command', () => {
       },
     ]);
     expect(readFileSync(statePath)).toEqual(before);
+  });
+
+  it('dry-run prints ordered trust removal and fingerprint-scoped deletion commands', async () => {
+    const path = join(fixture(), 'ca');
+    const result = output();
+
+    await invoke(
+      createUninstallCommand(
+        dependencies(path, macEnvironment(), [fakeAdapter('macos-keychain')]),
+      ),
+      { 'dry-run': true, json: true },
+    );
+
+    const commands = JSON.parse(result.stdout[0] ?? '').commands as Array<{
+      command: string;
+      manual: string;
+    }>;
+    const expected = [
+      ['security', 'remove-trusted-cert', '<ca-cert.pem>'],
+      ['security', 'delete-certificate', '-Z', '<sha256>', loginKeychainPath],
+    ].map((argv) => argv.map(shQuote).join(' '));
+    expect(commands.map(({ command }) => command)).toEqual(expected);
+    expect(commands.map(({ manual }) => manual)).toEqual(expected);
   });
 });
 

@@ -1,13 +1,12 @@
 import { X509Certificate } from 'node:crypto';
-import { mkdtemp, readFile, rm, rmdir } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { access, mkdtemp, readFile, rm, rmdir } from 'node:fs/promises';
+import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import { CertkitError } from '../core/errors.js';
 import type { Environment } from './detect.js';
 import type { RunResult } from './run.js';
 import type { StoreAdapter } from './store.js';
 
-const SYSTEM_KEYCHAIN = '/Library/Keychains/System.keychain';
 const SUBJECT = 'certkit development CA';
 const DEFAULT_TARGET = 'default';
 const TRUST_NOT_ACCEPTED = /CSSMERR_TP_NOT_TRUSTED|kSecTrustResultDeny/i;
@@ -18,7 +17,9 @@ type Command = (argv: string[]) => Promise<RunResult>;
 interface MacosAdapterDependencies {
   caCertPath: string;
   run: Command;
-  elevate: Command;
+  keychainPath?: string;
+  /** Accepted for existing status callers; macOS trust commands never elevate. */
+  elevate?: Command;
 }
 
 function certificateHashes(pem: string): { sha256: string; sha1: string } {
@@ -48,21 +49,57 @@ function matchedFingerprint(
 async function findCertificate(
   run: Command,
   sha256: string,
-  keychain?: string,
+  keychainPath: string,
 ): Promise<boolean | undefined> {
-  const argv = [
+  const result = await run([
     'security',
     'find-certificate',
     '-a',
     '-c',
     SUBJECT,
     '-p',
-    ...(keychain ? [keychain] : []),
-  ];
-  const result = await run(argv);
+    keychainPath,
+  ]);
   return result.code === 0
     ? matchedFingerprint(result.stdout, sha256)
     : undefined;
+}
+
+function parseUserKeychainList(output: string): string[] | undefined {
+  const paths: string[] = [];
+  for (const line of output.split(/\r?\n/)) {
+    const entry = line.trim();
+    if (!entry) continue;
+    if (!entry.startsWith('"') || !entry.endsWith('"')) return undefined;
+    const rawPath = entry.slice(1, -1);
+    if (/(^|[^\\])"/u.test(rawPath)) return undefined;
+    const keychainPath = rawPath.replaceAll('\\"', '"');
+    if (!keychainPath) return undefined;
+    paths.push(keychainPath);
+  }
+  return paths;
+}
+
+async function userKeychainSearchContains(
+  run: Command,
+  keychainPath: string,
+): Promise<boolean | undefined> {
+  const result = await run(['security', 'list-keychains', '-d', 'user']);
+  if (result.code !== 0) return undefined;
+  return parseUserKeychainList(result.stdout)?.includes(keychainPath);
+}
+
+async function keychainExists(
+  keychainPath: string,
+): Promise<boolean | undefined> {
+  try {
+    await access(keychainPath);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT'
+      ? false
+      : undefined;
+  }
 }
 
 function storeWriteFailure(message: string): CertkitError {
@@ -76,54 +113,56 @@ function assertDefaultTarget(target: string): void {
     );
 }
 
-export function macosInstallArgv(caCertPath: string): string[] {
+export function macosLoginKeychainPath(): string {
+  return path.join(homedir(), 'Library', 'Keychains', 'login.keychain-db');
+}
+
+export function macosInstallArgv(
+  caCertPath: string,
+  keychainPath: string,
+): string[] {
   return [
     'security',
     'add-trusted-cert',
-    '-d',
     '-r',
     'trustRoot',
+    '-p',
+    'ssl',
     '-k',
-    SYSTEM_KEYCHAIN,
+    keychainPath,
     caCertPath,
   ];
 }
 
 export function macosRemoveTrustArgv(caCertPath: string): string[] {
-  return ['security', 'remove-trusted-cert', '-d', caCertPath];
+  return ['security', 'remove-trusted-cert', caCertPath];
 }
 
-export function macosDeleteCertificateArgv(sha256: string): string[] {
-  return ['security', 'delete-certificate', '-Z', sha256, SYSTEM_KEYCHAIN];
+export function macosDeleteCertificateArgv(
+  sha256: string,
+  keychainPath: string,
+): string[] {
+  return ['security', 'delete-certificate', '-Z', sha256, keychainPath];
 }
 
-async function adminTrustContains(
-  run: Command,
-  sha1: string,
-): Promise<boolean> {
-  // Uninstall may export settings for verification; read-only status never does.
-  // Keep exported trust policy outside the CA directory: a process crash must
-  // not strand an unrecognized directory that blocks retirement cleanup.
+async function userTrustContains(run: Command, sha1: string): Promise<boolean> {
+  // Uninstall exports trust settings to verify removal; read-only status never exports them.
+  // Keep the private file outside the CA directory so an interrupted export cannot block retirement.
   const exportDir = await mkdtemp(path.join(tmpdir(), 'certkit-trust-'));
-  const exportPath = path.join(exportDir, 'admin-settings.plist');
+  const exportPath = path.join(exportDir, 'user-settings.plist');
   try {
-    const result = await run([
-      'security',
-      'trust-settings-export',
-      '-d',
-      exportPath,
-    ]);
+    const result = await run(['security', 'trust-settings-export', exportPath]);
     if (result.code !== 0) {
       if (NO_TRUST_SETTINGS.test(`${result.stdout}\n${result.stderr}`))
         return false;
       throw storeWriteFailure(
-        'Could not read macOS admin trust settings; CA recovery data was retained.',
+        'Could not read macOS user trust settings; CA recovery data was retained.',
       );
     }
     const plist = await readFile(exportPath, 'utf8');
     if (!/<plist\b[\s\S]*<dict\b/i.test(plist))
       throw storeWriteFailure(
-        'macOS returned unreadable admin trust settings; CA recovery data was retained.',
+        'macOS returned unreadable user trust settings; CA recovery data was retained.',
       );
     return [...plist.matchAll(/<key>\s*([\da-f]{40})\s*<\/key>/gi)].some(
       ([, hash]) => hash?.toLowerCase() === sha1,
@@ -137,15 +176,19 @@ async function adminTrustContains(
 export function createMacosAdapter(
   dependencies: MacosAdapterDependencies,
 ): StoreAdapter {
-  const { caCertPath, run, elevate } = dependencies;
+  const { caCertPath, run } = dependencies;
+  const keychainPath = dependencies.keychainPath ?? macosLoginKeychainPath();
   return {
     id: 'macos-keychain',
 
     async inspectInstalled(caCertPem, target) {
       assertDefaultTarget(target);
       try {
-        const { sha256 } = certificateHashes(caCertPem);
-        const present = await findCertificate(run, sha256, SYSTEM_KEYCHAIN);
+        const present = await findCertificate(
+          run,
+          certificateHashes(caCertPem).sha256,
+          keychainPath,
+        );
         return present === undefined
           ? 'inconclusive'
           : present
@@ -180,13 +223,57 @@ export function createMacosAdapter(
             },
           ];
 
-        const present = await findCertificate(run, expected.sha256);
+        const exists = await keychainExists(keychainPath);
+        if (exists === false)
+          return [
+            {
+              state: 'not-detected',
+              target: DEFAULT_TARGET,
+              detail: 'The current user login keychain is unavailable.',
+            },
+          ];
+        if (exists === undefined)
+          return [
+            {
+              state: 'unknown',
+              target: DEFAULT_TARGET,
+              detail: 'The current user login keychain could not be inspected.',
+            },
+          ];
+
+        const inSearchList = await userKeychainSearchContains(
+          run,
+          keychainPath,
+        );
+        if (inSearchList === undefined)
+          return [
+            {
+              state: 'unknown',
+              target: DEFAULT_TARGET,
+              detail: 'The macOS user keychain list could not be read.',
+            },
+          ];
+        if (!inSearchList)
+          return [
+            {
+              state: 'not-detected',
+              target: DEFAULT_TARGET,
+              detail:
+                'The login keychain is not in the user keychain search list.',
+            },
+          ];
+
+        const present = await findCertificate(
+          run,
+          expected.sha256,
+          keychainPath,
+        );
         if (present === undefined)
           return [
             {
               state: 'unknown',
               target: DEFAULT_TARGET,
-              detail: 'The default macOS keychain list could not be read.',
+              detail: 'The login keychain certificate read was inconclusive.',
             },
           ];
 
@@ -222,7 +309,7 @@ export function createMacosAdapter(
             target: DEFAULT_TARGET,
             detail: present
               ? 'The default SSL trust result could not be established.'
-              : 'The SSL result is inconclusive and no matching CA fingerprint was found.',
+              : 'The SSL result is inconclusive and no matching CA fingerprint was found in the login keychain.',
           },
         ];
       } catch {
@@ -238,38 +325,48 @@ export function createMacosAdapter(
       }
     },
 
-    async install(caCertPath, target) {
+    async install(caPath, target) {
       assertDefaultTarget(target);
       try {
-        const { sha256 } = certificateHashes(
-          await readFile(caCertPath, 'utf8'),
-        );
-        const added = await elevate(macosInstallArgv(caCertPath));
-        if (added.code !== 0)
+        const { sha256 } = certificateHashes(await readFile(caPath, 'utf8'));
+        const exists = await keychainExists(keychainPath);
+        if (exists !== true)
           throw storeWriteFailure(
-            'Could not add the CA to the macOS System keychain; rerun `certkit install` or use the manual trust command.',
+            `The macOS login keychain ${keychainPath} is unavailable. Restore it and add it to the user keychain search list, then rerun \`certkit install\`; use \`certkit install --dry-run\` for the manual command.`,
+          );
+        const inSearchList = await userKeychainSearchContains(
+          run,
+          keychainPath,
+        );
+        if (inSearchList !== true)
+          throw storeWriteFailure(
+            `The macOS login keychain ${keychainPath} is ${inSearchList === false ? 'not in' : 'not confirmed in'} the user keychain search list. Add it to that list and rerun \`certkit install\`; use \`certkit install --dry-run\` for the manual command.`,
           );
 
-        const present = await findCertificate(
-          run,
-          sha256,
-          SYSTEM_KEYCHAIN,
-        ).catch(() => undefined);
+        const added = await run(macosInstallArgv(caPath, keychainPath));
+        if (added.code !== 0)
+          throw storeWriteFailure(
+            'Could not add the CA to the macOS login keychain. macOS may request native user authentication; approve its dialog and rerun `certkit install`. Certkit never collects a password. Use `certkit install --dry-run` for the manual command.',
+          );
+
+        const present = await findCertificate(run, sha256, keychainPath).catch(
+          () => undefined,
+        );
         if (present === undefined)
           return {
             state: 'inconclusive',
             detail:
-              'The add command succeeded, but the System keychain read-back was unavailable; rerun `certkit install`.',
+              'The add command succeeded, but the login keychain read-back was unavailable; rerun `certkit install`.',
           };
         if (!present)
           throw storeWriteFailure(
-            'The macOS System keychain did not contain the installed CA after the add command; rerun `certkit install`.',
+            'The macOS login keychain did not contain the installed CA after the add command; rerun `certkit install`.',
           );
         return { state: 'verified' };
       } catch (error) {
         if (error instanceof CertkitError) throw error;
         throw storeWriteFailure(
-          'Could not verify the macOS System keychain install; rerun `certkit install` or use the manual trust command.',
+          'Could not verify the macOS login keychain install; rerun `certkit install` or use the manual trust command.',
         );
       }
     },
@@ -286,42 +383,42 @@ export function createMacosAdapter(
             'The macOS CA path does not match the requested fingerprint; CA recovery data was retained.',
           );
 
-        const systemHasCa = await findCertificate(
+        const loginHasCa = await findCertificate(
           run,
           identity.sha256,
-          SYSTEM_KEYCHAIN,
+          keychainPath,
         );
-        if (systemHasCa === undefined)
+        if (loginHasCa === undefined)
           throw storeWriteFailure(
-            'Could not read the macOS System keychain; CA recovery data was retained.',
+            'Could not read the macOS login keychain; CA recovery data was retained.',
           );
 
-        if (await adminTrustContains(run, identity.sha1)) {
-          const removed = await elevate(macosRemoveTrustArgv(caCertPath));
+        if (await userTrustContains(run, identity.sha1)) {
+          const removed = await run(macosRemoveTrustArgv(caCertPath));
           if (removed.code !== 0)
             throw storeWriteFailure(
-              'Could not remove the macOS admin trust setting; CA recovery data was retained.',
+              'Could not remove the macOS user trust setting; CA recovery data was retained. macOS may request native user authentication; Certkit never collects a password.',
             );
-          if (await adminTrustContains(run, identity.sha1))
+          if (await userTrustContains(run, identity.sha1))
             throw storeWriteFailure(
-              'The macOS admin trust setting remains after removal; CA recovery data was retained.',
+              'The macOS user trust setting remains after removal; CA recovery data was retained.',
             );
         }
 
-        if (systemHasCa) {
-          const deleted = await elevate(
-            macosDeleteCertificateArgv(identity.sha256),
+        if (loginHasCa) {
+          const deleted = await run(
+            macosDeleteCertificateArgv(identity.sha256, keychainPath),
           );
           if (deleted.code !== 0)
             throw storeWriteFailure(
-              'Could not delete the CA from the macOS System keychain; CA recovery data was retained.',
+              'Could not delete the CA from the macOS login keychain; CA recovery data was retained. macOS may request native user authentication; Certkit never collects a password.',
             );
           if (
-            (await findCertificate(run, identity.sha256, SYSTEM_KEYCHAIN)) !==
+            (await findCertificate(run, identity.sha256, keychainPath)) !==
             false
           )
             throw storeWriteFailure(
-              'The CA remains in the macOS System keychain after deletion; CA recovery data was retained.',
+              'The CA remains in the macOS login keychain after deletion; CA recovery data was retained.',
             );
         }
       } catch (error) {
