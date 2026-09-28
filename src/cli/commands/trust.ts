@@ -1,6 +1,6 @@
 import { X509Certificate } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import type { FsGuard, StateFile } from '../../core/cadir.js';
 import { caDir } from '../../core/certificate.js';
 import { CertkitError, type ErrorCode } from '../../core/errors.js';
@@ -20,6 +20,10 @@ import {
   macosLoginKeychainPath,
   macosRemoveTrustArgv,
 } from '../../platforms/macos.js';
+import {
+  createNssAdapter,
+  nssCertificateNickname,
+} from '../../platforms/nss.js';
 import { run } from '../../platforms/run.js';
 import type { StoreAdapter } from '../../platforms/store.js';
 import {
@@ -92,12 +96,17 @@ function defaultAdapterFactory(
   caCertPath: string,
   elevateCommand: typeof elevate,
 ): StoreAdapter[] {
+  const adapters: StoreAdapter[] = [];
   if (process.platform === 'darwin')
-    return [createMacosAdapter({ caCertPath, run })];
-  if (process.platform === 'win32') return [createWindowsAdapter({ run })];
+    adapters.push(createMacosAdapter({ caCertPath, run }));
+  if (process.platform === 'win32')
+    adapters.push(createWindowsAdapter({ run }));
   if (process.platform === 'linux')
-    return [createLinuxAdapter({ caCertPath, run, elevate: elevateCommand })];
-  return [];
+    adapters.push(
+      createLinuxAdapter({ caCertPath, run, elevate: elevateCommand }),
+    );
+  adapters.push(createNssAdapter({ run }));
+  return adapters;
 }
 
 export function adaptersById(
@@ -127,7 +136,9 @@ export function adapterTargets(
         action === 'install'
           ? (store.installTargets ?? [])
           : (store.targets ?? []);
-      for (const target of values) targets.push({ store: store.store, target });
+      for (const target of values)
+        if (resolve(target) !== '/etc/pki/nssdb')
+          targets.push({ store: store.store, target });
     } else if (store.store === 'linux-system' && store.detected) {
       const mechanism = store.detail;
       const target =
@@ -307,6 +318,37 @@ export function planInstall(
 ): DryRunCommand[] {
   const path = certificateExists ? caCertPath : '<ca-cert.pem>';
   return targets.flatMap((target) => {
+    if (target.store === 'nss') {
+      let nickname = 'certkit development CA <sha256>';
+      if (certificateExists) {
+        try {
+          nickname = nssCertificateNickname(readFileSync(path, 'utf8'));
+        } catch {
+          // Keep a symbolic nickname when the CA identity cannot be read.
+        }
+      }
+      const command = [
+        'certutil',
+        '-A',
+        '-n',
+        nickname,
+        '-t',
+        'C,,',
+        '-d',
+        `sql:${target.target}`,
+        '-i',
+        path,
+      ]
+        .map(shQuote)
+        .join(' ');
+      return [
+        {
+          ...target,
+          command,
+          manual: `Install Mozilla NSS certutil manually if needed, then run: ${command}`,
+        },
+      ];
+    }
     if (
       target.store === 'linux-system' &&
       isLinuxTrustMechanism(target.mechanism) &&
@@ -344,6 +386,39 @@ export function planUninstall(
   const path = certificateExists ? caCertPath : '<ca-cert.pem>';
   const fingerprint = sha256 ?? '<sha256>';
   return targets.flatMap((target) => {
+    if (target.store === 'nss') {
+      let nickname = 'certkit development CA <sha256>';
+      if (certificateExists && sha256) {
+        try {
+          const caCertPem = readFileSync(path, 'utf8');
+          const certificate = new X509Certificate(caCertPem);
+          const actual = certificate.fingerprint256
+            .replaceAll(':', '')
+            .toLowerCase();
+          if (actual === sha256.toLowerCase())
+            nickname = nssCertificateNickname(caCertPem);
+        } catch {
+          // Keep a symbolic nickname when the CA identity cannot be verified.
+        }
+      }
+      const command = [
+        'certutil',
+        '-D',
+        '-n',
+        nickname,
+        '-d',
+        `sql:${target.target}`,
+      ]
+        .map(shQuote)
+        .join(' ');
+      return [
+        {
+          ...target,
+          command,
+          manual: `Remove only the matching CA after checking its fingerprint: ${command}`,
+        },
+      ];
+    }
     if (
       target.store === 'linux-system' &&
       isLinuxTrustMechanism(target.mechanism) &&

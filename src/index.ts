@@ -11,6 +11,7 @@ import { detect } from './platforms/detect.js';
 import { createWindowsFsGuard } from './platforms/fsguard.js';
 import { createLinuxAdapter } from './platforms/linux.js';
 import { createMacosAdapter } from './platforms/macos.js';
+import { createNssAdapter } from './platforms/nss.js';
 import { run } from './platforms/run.js';
 import { createWindowsAdapter } from './platforms/windows.js';
 
@@ -66,6 +67,14 @@ export async function status(
               run,
             }).checkTrust(material.certPem, environment)
           : [];
+  const nssStore = environment.stores.find((store) => store.store === 'nss');
+  const nssResults =
+    material && nssStore?.detected
+      ? await createNssAdapter({ run }).checkTrust(
+          material.certPem,
+          environment,
+        )
+      : [];
   const activeAdapterStore =
     environment.os === 'macos'
       ? 'macos-keychain'
@@ -78,7 +87,11 @@ export async function status(
   const stores: StatusReport['stores'][number][] = [];
   for (const detectedStore of environment.stores) {
     const adapterResults =
-      detectedStore.store === activeAdapterStore ? results : [];
+      detectedStore.store === activeAdapterStore
+        ? results
+        : detectedStore.store === 'nss'
+          ? nssResults
+          : [];
     const pendingWrites =
       material?.state.pendingWrites.filter(
         (write) => write.store === detectedStore.store,

@@ -994,6 +994,67 @@ describe('install command', () => {
     });
   });
 
+  it('registers NSS install and removal dry-run plans on every OS', async () => {
+    const path = join(fixture(), 'ca');
+    const target = '/home/test/.mozilla/firefox/profile.default';
+    const env: Environment = {
+      os: 'linux',
+      wsl: false,
+      stores: [
+        { store: 'macos-keychain', detected: false },
+        { store: 'windows-root', detected: false },
+        { store: 'linux-system', detected: false },
+        {
+          store: 'nss',
+          detected: true,
+          targets: [target, '/etc/pki/nssdb'],
+          installTargets: [target, '/etc/pki/nssdb'],
+        },
+      ],
+    };
+    const dependencies: TrustCommandDependencies = {
+      resolveCaDir: () => path,
+      detect: async () => env,
+    };
+    const result = output();
+    const originalPlatform = process.platform;
+    try {
+      for (const platform of ['darwin', 'win32', 'linux'] as const) {
+        Object.defineProperty(process, 'platform', { value: platform });
+        await invoke(createInstallCommand(dependencies), {
+          'dry-run': true,
+          json: true,
+        });
+        await invoke(createUninstallCommand(dependencies), {
+          'dry-run': true,
+          json: true,
+        });
+      }
+    } finally {
+      Object.defineProperty(process, 'platform', { value: originalPlatform });
+    }
+
+    expect(existsSync(path)).toBe(false);
+    for (const line of result.stdout) {
+      const report = JSON.parse(line) as {
+        commands: Array<{
+          store: string;
+          target: string;
+          command: string;
+          manual: string;
+        }>;
+      };
+      expect(report.commands).toHaveLength(1);
+      expect(report.commands[0]).toMatchObject({ store: 'nss', target });
+    }
+    expect(result.stdout).toHaveLength(6);
+    expect(result.stdout.join('\n')).not.toContain('/etc/pki/nssdb');
+    expect(result.stdout[0]).toContain("'-A'");
+    expect(result.stdout[0]).toContain("'certkit development CA <sha256>'");
+    expect(result.stdout[1]).toContain("'-D'");
+    expect(result.stdout[1]).toContain("'certkit development CA <sha256>'");
+  });
+
   it('uses the exact certificate SHA-1 thumbprint in Windows removal plans', async () => {
     const path = join(fixture(), 'ca');
     await certificateFor(['localhost'], { caDir: path });

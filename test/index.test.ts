@@ -12,12 +12,14 @@ import { certificateFor, status } from '../src/index.js';
 import { detect } from '../src/platforms/detect.js';
 import { createLinuxAdapter } from '../src/platforms/linux.js';
 import { createMacosAdapter } from '../src/platforms/macos.js';
+import { createNssAdapter } from '../src/platforms/nss.js';
 import { run } from '../src/platforms/run.js';
 import { createWindowsAdapter } from '../src/platforms/windows.js';
 
 const mockMacosCheckTrust = vi.hoisted(() => vi.fn());
 const mockWindowsCheckTrust = vi.hoisted(() => vi.fn());
 const mockLinuxCheckTrust = vi.hoisted(() => vi.fn());
+const mockNssCheckTrust = vi.hoisted(() => vi.fn());
 
 vi.mock('../src/platforms/detect.js', () => ({
   detect: vi.fn(async () => ({
@@ -55,6 +57,16 @@ vi.mock('../src/platforms/linux.js', () => ({
   createLinuxAdapter: vi.fn(() => ({
     id: 'linux-system',
     checkTrust: mockLinuxCheckTrust,
+    inspectInstalled: vi.fn(),
+    install: vi.fn(),
+    uninstall: vi.fn(),
+  })),
+}));
+
+vi.mock('../src/platforms/nss.js', () => ({
+  createNssAdapter: vi.fn(() => ({
+    id: 'nss',
+    checkTrust: mockNssCheckTrust,
     inspectInstalled: vi.fn(),
     install: vi.fn(),
     uninstall: vi.fn(),
@@ -136,6 +148,7 @@ beforeEach(() => {
   mockMacosCheckTrust.mockResolvedValue([
     { state: 'unknown', target: 'default', detail: 'probe inconclusive' },
   ]);
+  mockNssCheckTrust.mockResolvedValue([]);
 });
 
 afterEach(() => {
@@ -264,7 +277,39 @@ describe('status', () => {
     expect(readFileSync(keyPath, 'utf8')).toBe('broken');
   });
 
-  it('reports every detected NSS database without an adapter', async () => {
+  it('checks every detected NSS database through the read-only adapter', async () => {
+    const caDir = join(root, 'ca');
+    await certificateFor(['localhost'], { caDir });
+    detectLinuxNss();
+    mockNssCheckTrust.mockResolvedValue([
+      { state: 'trusted', target: nssTargets[0] },
+      {
+        state: 'untrusted',
+        target: nssTargets[1],
+        detail: 'present without SSL trust',
+      },
+    ]);
+
+    const report = await status({ caDir });
+
+    expect(report.stores).toContainEqual({
+      store: 'nss',
+      state: 'trusted',
+      target: nssTargets[0],
+    });
+    expect(report.stores).toContainEqual({
+      store: 'nss',
+      state: 'untrusted',
+      target: nssTargets[1],
+      detail: 'present without SSL trust',
+    });
+    expect(createNssAdapter).toHaveBeenCalledWith({ run });
+    expect(mockNssCheckTrust).toHaveBeenCalledOnce();
+    expect(run).not.toHaveBeenCalled();
+    expect(createMacosAdapter).not.toHaveBeenCalled();
+  });
+
+  it('keeps every detected NSS database not-detected when the adapter has no results', async () => {
     const caDir = join(root, 'ca');
     await certificateFor(['localhost'], { caDir });
     detectLinuxNss();
@@ -281,8 +326,7 @@ describe('status', () => {
         })),
       ],
     });
-    expect(run).not.toHaveBeenCalled();
-    expect(createMacosAdapter).not.toHaveBeenCalled();
+    expect(mockNssCheckTrust).toHaveBeenCalledOnce();
   });
 
   it('keeps other detected NSS databases when one target has a pending write', async () => {
