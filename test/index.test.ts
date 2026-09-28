@@ -12,8 +12,10 @@ import { certificateFor, status } from '../src/index.js';
 import { detect } from '../src/platforms/detect.js';
 import { createMacosAdapter } from '../src/platforms/macos.js';
 import { run } from '../src/platforms/run.js';
+import { createWindowsAdapter } from '../src/platforms/windows.js';
 
 const mockMacosCheckTrust = vi.hoisted(() => vi.fn());
+const mockWindowsCheckTrust = vi.hoisted(() => vi.fn());
 
 vi.mock('../src/platforms/detect.js', () => ({
   detect: vi.fn(async () => ({
@@ -32,6 +34,16 @@ vi.mock('../src/platforms/macos.js', () => ({
   createMacosAdapter: vi.fn(() => ({
     id: 'macos-keychain',
     checkTrust: mockMacosCheckTrust,
+    install: vi.fn(),
+    uninstall: vi.fn(),
+  })),
+}));
+
+vi.mock('../src/platforms/windows.js', () => ({
+  createWindowsAdapter: vi.fn(() => ({
+    id: 'windows-root',
+    checkTrust: mockWindowsCheckTrust,
+    inspectInstalled: vi.fn(),
     install: vi.fn(),
     uninstall: vi.fn(),
   })),
@@ -70,6 +82,19 @@ function detectMacos(): void {
     stores: [
       { store: 'macos-keychain', detected: true },
       { store: 'windows-root', detected: false },
+      { store: 'linux-system', detected: false },
+      { store: 'nss', detected: false, targets: [], installTargets: [] },
+    ],
+  });
+}
+
+function detectWindows(): void {
+  vi.mocked(detect).mockResolvedValue({
+    os: 'windows',
+    wsl: false,
+    stores: [
+      { store: 'macos-keychain', detected: false },
+      { store: 'windows-root', detected: true },
       { store: 'linux-system', detected: false },
       { store: 'nss', detected: false, targets: [], installTargets: [] },
     ],
@@ -303,5 +328,23 @@ describe('status', () => {
         },
       ],
     });
+  });
+
+  it('uses the Windows Root adapter for detected Windows status', async () => {
+    const caDir = join(root, 'ca');
+    await certificateFor(['localhost'], { caDir });
+    detectWindows();
+    mockWindowsCheckTrust.mockResolvedValue([
+      { state: 'trusted', target: 'default' },
+    ]);
+
+    const report = await status({ caDir });
+
+    expect(report.stores).toContainEqual({
+      store: 'windows-root',
+      state: 'trusted',
+      target: 'default',
+    });
+    expect(createWindowsAdapter).toHaveBeenCalled();
   });
 });

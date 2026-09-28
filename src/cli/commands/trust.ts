@@ -1,3 +1,5 @@
+import { X509Certificate } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { FsGuard, StateFile } from '../../core/cadir.js';
 import { caDir } from '../../core/certificate.js';
@@ -13,6 +15,11 @@ import {
 } from '../../platforms/macos.js';
 import { run } from '../../platforms/run.js';
 import type { StoreAdapter } from '../../platforms/store.js';
+import {
+  createWindowsAdapter,
+  windowsDeleteCertificateArgv,
+  windowsInstallArgv,
+} from '../../platforms/windows.js';
 import { type elevate, shQuote } from '../elevate.js';
 
 export type TrustStore = StoreAdapter['id'];
@@ -63,13 +70,10 @@ interface DryRunUncertainty extends TrustTarget {
 }
 
 function defaultAdapterFactory(caCertPath: string): StoreAdapter[] {
-  if (process.platform !== 'darwin') return [];
-  return [
-    createMacosAdapter({
-      caCertPath,
-      run,
-    }),
-  ];
+  if (process.platform === 'darwin')
+    return [createMacosAdapter({ caCertPath, run })];
+  if (process.platform === 'win32') return [createWindowsAdapter({ run })];
+  return [];
 }
 
 export function adaptersById(
@@ -265,8 +269,13 @@ export function planInstall(
 ): DryRunCommand[] {
   const path = certificateExists ? caCertPath : '<ca-cert.pem>';
   return targets.flatMap((target) => {
-    if (target.store !== 'macos-keychain' || target.target !== 'default')
-      return [];
+    if (target.target !== 'default') return [];
+    if (target.store === 'windows-root') {
+      const argv = windowsInstallArgv(path);
+      const command = `${argv.slice(0, -1).join(' ')} "${path}"`;
+      return [{ ...target, command, manual: command }];
+    }
+    if (target.store !== 'macos-keychain') return [];
     const command = macosInstallArgv(path, macosLoginKeychainPath())
       .map(shQuote)
       .join(' ');
@@ -283,8 +292,26 @@ export function planUninstall(
   const path = certificateExists ? caCertPath : '<ca-cert.pem>';
   const fingerprint = sha256 ?? '<sha256>';
   return targets.flatMap((target) => {
-    if (target.store !== 'macos-keychain' || target.target !== 'default')
-      return [];
+    if (target.target !== 'default') return [];
+    if (target.store === 'windows-root') {
+      let sha1 = '<sha1-thumbprint>';
+      if (certificateExists && sha256) {
+        try {
+          const certificate = new X509Certificate(readFileSync(path));
+          const actualSha256 = certificate.fingerprint256
+            .replaceAll(':', '')
+            .toLowerCase();
+          if (actualSha256 === sha256.toLowerCase())
+            sha1 = certificate.fingerprint.replaceAll(':', '').toUpperCase();
+        } catch {
+          // Keep a symbolic thumbprint when the CA identity cannot be verified.
+        }
+      }
+      const argv = windowsDeleteCertificateArgv(sha1);
+      const command = `${argv.slice(0, -1).join(' ')} "${sha1}"`;
+      return [{ ...target, command, manual: command }];
+    }
+    if (target.store !== 'macos-keychain') return [];
     return [
       macosRemoveTrustArgv(path),
       macosDeleteCertificateArgv(fingerprint, macosLoginKeychainPath()),

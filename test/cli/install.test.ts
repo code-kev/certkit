@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import { X509Certificate } from 'node:crypto';
 import {
   existsSync,
   lstatSync,
@@ -15,7 +16,10 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createInstallCommand } from '../../src/cli/commands/install.js';
-import type { TrustCommandDependencies } from '../../src/cli/commands/trust.js';
+import {
+  planUninstall,
+  type TrustCommandDependencies,
+} from '../../src/cli/commands/trust.js';
 import { createUninstallCommand } from '../../src/cli/commands/uninstall.js';
 import { shQuote } from '../../src/cli/elevate.js';
 import { certificateFor } from '../../src/core/certificate.js';
@@ -59,6 +63,19 @@ function macEnvironmentWithNss(target = '/tmp/firefox-profile'): Environment {
   nss.targets = [target];
   nss.installTargets = [target];
   return env;
+}
+
+function windowsEnvironment(): Environment {
+  return {
+    os: 'windows',
+    wsl: false,
+    stores: [
+      { store: 'macos-keychain', detected: false },
+      { store: 'windows-root', detected: true },
+      { store: 'linux-system', detected: false },
+      { store: 'nss', detected: false, targets: [], installTargets: [] },
+    ],
+  };
 }
 
 function twoDatabaseEnvironment(): Environment {
@@ -785,6 +802,79 @@ describe('install command', () => {
     expect(command.command).not.toContain('sudo ');
     expect(command.manual).toBe(command.command);
     expect(command.command).toContain("'<ca-cert.pem>'");
+  });
+
+  it('registers Windows current-user install and removal commands by default', async () => {
+    const path = join(fixture(), 'home with spaces', 'ca');
+    const result = output();
+    const originalPlatform = process.platform;
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    try {
+      const dependencies: TrustCommandDependencies = {
+        resolveCaDir: () => path,
+        detect: async () => windowsEnvironment(),
+      };
+      await invoke(createInstallCommand(dependencies), {
+        'dry-run': true,
+        json: true,
+      });
+      await invoke(createUninstallCommand(dependencies), {
+        'dry-run': true,
+        json: true,
+      });
+    } finally {
+      Object.defineProperty(process, 'platform', { value: originalPlatform });
+    }
+
+    expect(existsSync(path)).toBe(false);
+    expect(JSON.parse(result.stdout[0] ?? '')).toMatchObject({
+      commands: [
+        {
+          store: 'windows-root',
+          target: 'default',
+          command: 'certutil -user -addstore Root "<ca-cert.pem>"',
+          manual: 'certutil -user -addstore Root "<ca-cert.pem>"',
+        },
+      ],
+      unsupported: [],
+    });
+    expect(JSON.parse(result.stdout[1] ?? '')).toMatchObject({
+      commands: [
+        {
+          store: 'windows-root',
+          target: 'default',
+          command: 'certutil -user -delstore Root "<sha1-thumbprint>"',
+          manual: 'certutil -user -delstore Root "<sha1-thumbprint>"',
+        },
+      ],
+      unsupported: [],
+    });
+  });
+
+  it('uses the exact certificate SHA-1 thumbprint in Windows removal plans', async () => {
+    const path = join(fixture(), 'ca');
+    await certificateFor(['localhost'], { caDir: path });
+    const sha1 = new X509Certificate(
+      readFileSync(join(path, 'ca-cert.pem'), 'utf8'),
+    ).fingerprint
+      .replaceAll(':', '')
+      .toUpperCase();
+
+    expect(
+      planUninstall(
+        [{ store: 'windows-root', target: 'default' }],
+        join(path, 'ca-cert.pem'),
+        true,
+        state(path).ca.sha256,
+      ),
+    ).toEqual([
+      {
+        store: 'windows-root',
+        target: 'default',
+        command: `certutil -user -delstore Root "${sha1}"`,
+        manual: `certutil -user -delstore Root "${sha1}"`,
+      },
+    ]);
   });
 
   it('states that macOS may request native authentication without collecting a password', async () => {

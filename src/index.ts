@@ -11,6 +11,7 @@ import { detect } from './platforms/detect.js';
 import { createWindowsFsGuard } from './platforms/fsguard.js';
 import { createMacosAdapter } from './platforms/macos.js';
 import { run } from './platforms/run.js';
+import { createWindowsAdapter } from './platforms/windows.js';
 
 export type { ErrorCode } from './core/errors.js';
 export { CertkitError } from './core/errors.js';
@@ -50,12 +51,22 @@ export async function status(
             throw new Error('status cannot elevate');
           },
         }).checkTrust(material.certPem, environment)
-      : [];
+      : material && environment.os === 'windows'
+        ? await createWindowsAdapter({
+            run,
+          }).checkTrust(material.certPem, environment)
+        : [];
+  const activeAdapterStore =
+    environment.os === 'macos'
+      ? 'macos-keychain'
+      : environment.os === 'windows'
+        ? 'windows-root'
+        : undefined;
 
   const stores: StatusReport['stores'][number][] = [];
   for (const detectedStore of environment.stores) {
     const adapterResults =
-      detectedStore.store === 'macos-keychain' ? results : [];
+      detectedStore.store === activeAdapterStore ? results : [];
     const pendingWrites =
       material?.state.pendingWrites.filter(
         (write) => write.store === detectedStore.store,
