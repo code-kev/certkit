@@ -342,7 +342,6 @@ describe('coexistence', () => {
     const db = fakeNssDatabase();
     const deps = dependencies(dir, env, [db.adapter]);
 
-    output();
     await invoke(createInstallCommand(deps));
     expect(process.exitCode).toBe(0);
     const pem = readFileSync(join(dir, 'ca-cert.pem'), 'utf8');

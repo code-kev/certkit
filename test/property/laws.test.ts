@@ -73,9 +73,7 @@ describe('law (a): name containment and idempotence', () => {
             result = validateNames(names);
           } catch (error) {
             expect(error).toBeInstanceOf(CertkitError);
-            expect(['INVALID_NAME', 'NAME_LIMIT']).toContain(
-              (error as CertkitError).code,
-            );
+            expect((error as CertkitError).code).toBe('INVALID_NAME');
             return;
           }
           expect(names.length).toBeGreaterThan(0);

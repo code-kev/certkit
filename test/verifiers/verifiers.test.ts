@@ -32,6 +32,13 @@ function binaryAvailable(binary: string): boolean {
 }
 
 const openssl = binaryAvailable('openssl');
+// LibreSSL (stock macOS `openssl`) has no -verify_ip/-verify_hostname; gate
+// the named-verify assertions on real OpenSSL capability, not existence.
+const opensslNamedVerify =
+  openssl &&
+  (
+    spawnSync('openssl', ['version'], { encoding: 'utf8' }).stdout ?? ''
+  ).startsWith('OpenSSL');
 // Reuse the project's NSS resolver so this oracle never runs the Windows
 // System32 certutil, which is a different tool.
 const certutil = await resolveNssCertutil();
@@ -84,7 +91,9 @@ function entryFor(testCase: CorpusCase): MintedCase {
 function opensslText(leafPath: string): string {
   const result = spawnSync(
     'openssl',
-    ['x509', '-in', leafPath, '-noout', '-text'],
+    // RFC2253 keeps the Subject rendering stable (`CN=localhost`) across
+    // OpenSSL 3.0–3.6; the 3.0–3.5 oneline default prints `CN = localhost`.
+    ['x509', '-in', leafPath, '-noout', '-text', '-nameopt', 'RFC2253'],
     {
       encoding: 'utf8',
     },
@@ -174,6 +183,10 @@ describe('openssl oracle', () => {
       console.warn(
         'verifier oracle skipped (openssl): certificate chains and fields are unverified',
       );
+    else if (!opensslNamedVerify)
+      console.warn(
+        'verifier oracle degraded (openssl): named-verify assertions skipped; the openssl binary lacks -verify_ip/-verify_hostname',
+      );
   });
 
   it.skipIf(!openssl).each(cases())(
@@ -190,21 +203,25 @@ describe('openssl oracle', () => {
       expect(verified.status, verified.stderr).toBe(0);
       expect(verified.stdout).toContain(': OK');
 
-      const flag =
-        entry.case.verifyHost.kind === 'ip' ? '-verify_ip' : '-verify_hostname';
-      const named = spawnSync(
-        'openssl',
-        [
-          'verify',
-          '-CAfile',
-          entry.caPath,
-          flag,
-          entry.case.verifyHost.value,
-          entry.leafPath,
-        ],
-        { encoding: 'utf8' },
-      );
-      expect(named.status, named.stderr).toBe(0);
+      if (opensslNamedVerify) {
+        const flag =
+          entry.case.verifyHost.kind === 'ip'
+            ? '-verify_ip'
+            : '-verify_hostname';
+        const named = spawnSync(
+          'openssl',
+          [
+            'verify',
+            '-CAfile',
+            entry.caPath,
+            flag,
+            entry.case.verifyHost.value,
+            entry.leafPath,
+          ],
+          { encoding: 'utf8' },
+        );
+        expect(named.status, named.stderr).toBe(0);
+      }
 
       const text = opensslText(entry.leafPath);
       expect(opensslSanLine(text)).toBe(entry.case.opensslSan);
