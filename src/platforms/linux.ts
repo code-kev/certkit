@@ -403,11 +403,6 @@ export function createLinuxAdapter(
             throw writeFailure(
               'The Linux anchor target does not contain exactly the recorded CA certificate; no file was removed. Inspect it manually, then rerun `certkit uninstall`; recovery data was retained.',
             );
-          if (anchor === 'present')
-            await elevateCommands(
-              [['rm', '--', target]],
-              'Could not remove the matching Linux trust anchor; recovery data was retained.',
-            );
           const temporary = await anchorState(
             caCertPem,
             linuxAnchorTempTarget(target),
@@ -419,6 +414,11 @@ export function createLinuxAdapter(
           if (temporary === 'different')
             throw writeFailure(
               'The temporary Linux anchor target does not contain exactly the recorded CA certificate; no file was removed. Inspect it manually, then rerun `certkit uninstall`; recovery data was retained.',
+            );
+          if (anchor === 'present')
+            await elevateCommands(
+              [['rm', '--', target]],
+              'Could not remove the matching Linux trust anchor; recovery data was retained.',
             );
           if (temporary === 'present')
             await elevateCommands(
