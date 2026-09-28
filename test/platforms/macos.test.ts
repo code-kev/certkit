@@ -1,7 +1,8 @@
 import { X509Certificate } from 'node:crypto';
+import { existsSync, statSync } from 'node:fs';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, isAbsolute, join, relative } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { mintCa } from '../../src/core/certgen.js';
 import type { Environment } from '../../src/platforms/detect.js';
@@ -200,6 +201,44 @@ describe('macOS keychain adapter', () => {
       },
     );
     expect(elevated).toHaveLength(1);
+  });
+
+  it('keeps interrupted trust export data outside the CA directory and cleans it', async () => {
+    const { ca } = await certificates();
+    const caCertPath = await caPath(ca);
+    const caDir = dirname(caCertPath);
+    let exportDir: string | undefined;
+    let exportDirMode: number | undefined;
+    const adapter = createMacosAdapter({
+      caCertPath,
+      run: async (argv) => {
+        if (argv[1] === 'find-certificate') return result(ca);
+        if (argv[1] === 'trust-settings-export') {
+          const outputPath = argv.at(-1);
+          if (!outputPath) throw new Error('missing export path');
+          exportDir = dirname(outputPath);
+          exportDirMode = statSync(exportDir).mode & 0o777;
+          await writeFile(outputPath, '<plist><dict/></plist>');
+          throw new Error('simulated interruption after export');
+        }
+        throw new Error(`unexpected command ${argv[1]}`);
+      },
+      elevate: async () => result(),
+    });
+
+    await expect(adapter.uninstall(ca, 'default')).rejects.toMatchObject({
+      code: 'STORE_WRITE_FAILED',
+    });
+    expect(exportDir).toBeDefined();
+    const relativeExportDir = relative(caDir, exportDir ?? '');
+    expect(
+      relativeExportDir === '' ||
+        (!relativeExportDir.startsWith('..') && !isAbsolute(relativeExportDir)),
+    ).toBe(false);
+    if (process.platform !== 'win32')
+      expect((exportDirMode ?? 0) & 0o077).toBe(0);
+    expect(existsSync(exportDir ?? '')).toBe(false);
+    expect(existsSync(caCertPath)).toBe(true);
   });
 
   it('removes admin trust before only the explicit System-keychain copy, then retries only what remains', async () => {

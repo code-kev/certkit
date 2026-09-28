@@ -242,6 +242,24 @@ export function emitResults(results: TrustResult[], json: boolean): void {
   }
 }
 
+export function unsupportedTargetResult(target: TrustTarget): TrustResult {
+  return {
+    ...target,
+    state: 'unknown',
+    error: {
+      code: 'UNSUPPORTED_PLATFORM',
+      message: `No registered ${target.store} adapter is available for ${target.target}; it was not modified or verified. See docs/trust-matrix.md for the manual path.`,
+    },
+  };
+}
+
+export function unsupportedTargetsMessage(targets: TrustTarget[]): string {
+  const formatted = targets
+    .map(({ store, target }) => `${store} (${target})`)
+    .join(', ');
+  return `No registered adapter is available for ${formatted}. No trust changes were made; see docs/trust-matrix.md for manual paths.`;
+}
+
 export function planInstall(
   targets: TrustTarget[],
   caCertPath: string,
@@ -282,6 +300,7 @@ export function emitDryRun(
   commands: DryRunCommand[],
   json: boolean,
   unresolvedTargets: TrustTarget[] = [],
+  unsupportedTargets: TrustTarget[] = [],
 ): void {
   const unresolved: DryRunUncertainty[] = unresolvedTargets.map((target) => ({
     ...target,
@@ -289,9 +308,16 @@ export function emitDryRun(
     detail:
       'A trust write outcome is unresolved; dry-run does not inspect or reconcile it.',
   }));
+  const unsupported = unsupportedTargets.map(unsupportedTargetResult);
   if (json) {
     console.log(
-      JSON.stringify({ schemaVersion: 1, dryRun: true, commands, unresolved }),
+      JSON.stringify({
+        schemaVersion: 1,
+        dryRun: true,
+        commands,
+        unresolved,
+        unsupported,
+      }),
     );
     return;
   }
@@ -307,6 +333,10 @@ export function emitDryRun(
   for (const target of unresolved)
     console.log(
       `${target.store} (${target.target}): unknown — ${target.detail}`,
+    );
+  for (const target of unsupported)
+    console.log(
+      `${target.store} (${target.target}): unknown — ${target.error?.message}`,
     );
 }
 

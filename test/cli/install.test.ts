@@ -1,11 +1,13 @@
 import { spawnSync } from 'node:child_process';
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -41,6 +43,16 @@ function macEnvironment(wsl = false): Environment {
       { store: 'nss', detected: false, targets: [], installTargets: [] },
     ],
   };
+}
+
+function macEnvironmentWithNss(target = '/tmp/firefox-profile'): Environment {
+  const env = macEnvironment();
+  const nss = env.stores.find((store) => store.store === 'nss');
+  if (!nss) throw new Error('macOS fixture is missing NSS detection');
+  nss.detected = true;
+  nss.targets = [target];
+  nss.installTargets = [target];
+  return env;
 }
 
 function twoDatabaseEnvironment(): Environment {
@@ -266,8 +278,9 @@ describe('install command', () => {
       { json: true },
     );
 
-    expect(process.exitCode).toBe(1);
-    expect(JSON.parse(result.stdout[0] ?? '')).toMatchObject({
+    expect(process.exitCode).toBe(0);
+    const outputJson = JSON.parse(result.stdout[0] ?? '');
+    expect(outputJson).toMatchObject({
       results: [
         {
           store: 'macos-keychain',
@@ -277,9 +290,94 @@ describe('install command', () => {
         },
       ],
     });
+    expect(outputJson.results[0]).not.toHaveProperty('error');
     expect(state(path).trustWrites).toHaveLength(1);
     expect(state(path).pendingWrites).toEqual([]);
     expect(adapter.installCalls).toEqual(['default']);
+  });
+
+  it('exits 1 when a verified install remains effectively untrusted', async () => {
+    const path = join(fixture(), 'ca');
+    const adapter = fakeAdapter('macos-keychain');
+    adapter.checkTrust = async () => [
+      {
+        target: 'default',
+        state: 'untrusted',
+        detail: 'policy rejects the CA',
+      },
+    ];
+    const result = output();
+
+    await invoke(
+      createInstallCommand(dependencies(path, macEnvironment(), [adapter])),
+      { json: true },
+    );
+
+    expect(process.exitCode).toBe(1);
+    expect(JSON.parse(result.stdout[0] ?? '')).toMatchObject({
+      results: [
+        {
+          store: 'macos-keychain',
+          target: 'default',
+          state: 'untrusted',
+          detail: 'policy rejects the CA',
+        },
+      ],
+    });
+    expect(state(path).trustWrites).toHaveLength(1);
+    expect(state(path).pendingWrites).toEqual([]);
+  });
+
+  it('installs supported macOS targets and reports detected NSS targets as unsupported', async () => {
+    const path = join(fixture(), 'ca');
+    const adapter = fakeAdapter('macos-keychain');
+    const result = output();
+
+    await invoke(
+      createInstallCommand(
+        dependencies(path, macEnvironmentWithNss(), [adapter]),
+      ),
+      { json: true },
+    );
+
+    expect(process.exitCode).toBe(1);
+    expect(adapter.installCalls).toEqual(['default']);
+    expect(JSON.parse(result.stdout[0] ?? '')).toMatchObject({
+      results: [
+        { store: 'macos-keychain', target: 'default', state: 'trusted' },
+        {
+          store: 'nss',
+          target: '/tmp/firefox-profile',
+          state: 'unknown',
+          error: { code: 'UNSUPPORTED_PLATFORM' },
+        },
+      ],
+    });
+    expect(state(path).trustWrites.map((write) => write.store)).toEqual([
+      'macos-keychain',
+    ]);
+  });
+
+  it('reports unsupported-only targets as a never-ran error without leaving a CA directory', async () => {
+    const path = join(fixture(), 'ca');
+    const result = output();
+
+    await invoke(
+      createInstallCommand(dependencies(path, twoDatabaseEnvironment(), [])),
+      { json: true },
+    );
+
+    expect(process.exitCode).toBe(2);
+    expect(JSON.parse(result.stdout[0] ?? '')).toMatchObject({
+      schemaVersion: 1,
+      error: {
+        code: 'UNSUPPORTED_PLATFORM',
+        message: expect.stringContaining(
+          'nss (/tmp/profile-a), nss (/tmp/profile-b)',
+        ),
+      },
+    });
+    expect(existsSync(path)).toBe(false);
   });
 
   it('persists pending before a command and reconciles a crash before that command', async () => {
@@ -596,7 +694,9 @@ describe('install command', () => {
     const result = output();
 
     await invoke(
-      createInstallCommand(dependencies(path, macEnvironment(), [])),
+      createInstallCommand(
+        dependencies(path, macEnvironment(), [fakeAdapter('macos-keychain')]),
+      ),
       {
         'dry-run': true,
         json: true,
@@ -620,6 +720,34 @@ describe('install command', () => {
     });
   });
 
+  it('dry-run reports detected targets outside the registered adapter set', async () => {
+    const path = join(fixture(), 'ca');
+    const result = output();
+
+    await invoke(
+      createInstallCommand(
+        dependencies(path, macEnvironmentWithNss(), [
+          fakeAdapter('macos-keychain'),
+        ]),
+      ),
+      { 'dry-run': true, json: true },
+    );
+
+    expect(process.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout[0] ?? '')).toMatchObject({
+      commands: [{ store: 'macos-keychain', target: 'default' }],
+      unsupported: [
+        {
+          store: 'nss',
+          target: '/tmp/firefox-profile',
+          state: 'unknown',
+          error: { code: 'UNSUPPORTED_PLATFORM' },
+        },
+      ],
+    });
+    expect(existsSync(path)).toBe(false);
+  });
+
   it('quotes the CA path in dry-run commands when the identity already exists', async () => {
     const path = join(fixture(), "ev il'$(touch /tmp/pwned)", 'ca');
     await certificateFor(['localhost'], { caDir: path });
@@ -636,7 +764,9 @@ describe('install command', () => {
     const result = output();
 
     await invoke(
-      createInstallCommand(dependencies(path, macEnvironment(), [])),
+      createInstallCommand(
+        dependencies(path, macEnvironment(), [fakeAdapter('macos-keychain')]),
+      ),
       {
         'dry-run': true,
         json: true,
@@ -659,6 +789,170 @@ describe('install command', () => {
 });
 
 describe('uninstall command', () => {
+  it('does not start retirement when every detected uninstall target is unsupported', async () => {
+    const path = join(fixture(), 'ca');
+    await certificateFor(['localhost'], { caDir: path });
+    const statePath = join(path, 'state.json');
+    const before = readFileSync(statePath);
+    const result = output();
+
+    await invoke(
+      createUninstallCommand(dependencies(path, twoDatabaseEnvironment(), [])),
+      { json: true },
+    );
+
+    expect(process.exitCode).toBe(2);
+    expect(JSON.parse(result.stdout[0] ?? '')).toMatchObject({
+      error: {
+        code: 'UNSUPPORTED_PLATFORM',
+        message: expect.stringContaining(
+          'nss (/tmp/profile-a), nss (/tmp/profile-b)',
+        ),
+      },
+    });
+    expect(readFileSync(statePath)).toEqual(before);
+    expect(existsSync(join(path, 'ca-cert.pem'))).toBe(true);
+  });
+
+  it('cleans a validated interrupted trust-settings export from an older run', async () => {
+    const path = join(fixture(), 'ca');
+    await certificateFor(['localhost'], { caDir: path });
+    const exportDir = join(path, '.certkit-trust-a1b2c3');
+    mkdirSync(exportDir, { mode: 0o700 });
+    writeFileSync(join(exportDir, 'admin-settings.plist'), '<plist/>', {
+      mode: 0o600,
+    });
+    const adapter = fakeAdapter('macos-keychain');
+
+    await invoke(
+      createUninstallCommand(dependencies(path, macEnvironment(), [adapter])),
+      { json: true },
+    );
+
+    expect(process.exitCode).toBe(0);
+    expect(existsSync(exportDir)).toBe(false);
+    expect(existsSync(path)).toBe(false);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'preserves a symlink that resembles an interrupted trust export directory',
+    async () => {
+      const root = fixture();
+      const path = join(root, 'ca');
+      await certificateFor(['localhost'], { caDir: path });
+      const foreignDir = join(root, 'foreign');
+      mkdirSync(foreignDir);
+      const foreignFile = join(foreignDir, 'keep.txt');
+      writeFileSync(foreignFile, 'foreign bytes');
+      const exportLink = join(path, '.certkit-trust-a1b2c3');
+      symlinkSync(foreignDir, exportLink, 'dir');
+      const adapter = fakeAdapter('macos-keychain');
+      const result = output();
+
+      await invoke(
+        createUninstallCommand(dependencies(path, macEnvironment(), [adapter])),
+        { json: true },
+      );
+
+      expect(process.exitCode).toBe(1);
+      expect(JSON.parse(result.stdout[0] ?? '')).toMatchObject({
+        error: { code: 'CA_UNREADABLE' },
+      });
+      expect(readFileSync(foreignFile, 'utf8')).toBe('foreign bytes');
+      expect(lstatSync(exportLink).isSymbolicLink()).toBe(true);
+      expect(existsSync(join(path, 'ca-cert.pem'))).toBe(true);
+      expect(existsSync(join(path, 'state.json'))).toBe(true);
+    },
+  );
+
+  it('removes supported targets and retains identity for a detected unsupported NSS target', async () => {
+    const path = join(fixture(), 'ca');
+    await certificateFor(['localhost'], { caDir: path });
+    const caState = state(path);
+    caState.trustWrites.push({
+      store: 'macos-keychain',
+      target: 'default',
+      serial: caState.ca.serial,
+      sha256: caState.ca.sha256,
+      timestamp: new Date().toISOString(),
+    });
+    writeFileSync(
+      join(path, 'state.json'),
+      `${JSON.stringify(caState, null, 2)}\n`,
+    );
+    const adapter = fakeAdapter('macos-keychain', new Set(['default']));
+    const result = output();
+
+    await invoke(
+      createUninstallCommand(
+        dependencies(path, macEnvironmentWithNss(), [adapter]),
+      ),
+      { json: true },
+    );
+
+    expect(process.exitCode).toBe(1);
+    expect(adapter.uninstallCalls).toEqual(['default']);
+    expect(JSON.parse(result.stdout[0] ?? '')).toMatchObject({
+      results: [
+        { store: 'macos-keychain', target: 'default', state: 'untrusted' },
+        {
+          store: 'nss',
+          target: '/tmp/firefox-profile',
+          state: 'unknown',
+          error: { code: 'UNSUPPORTED_PLATFORM' },
+        },
+      ],
+    });
+    expect(state(path).phase).toBe('retiring');
+    expect(state(path).trustWrites).toMatchObject([
+      { store: 'nss', target: '/tmp/firefox-profile' },
+    ]);
+    expect(existsSync(join(path, 'ca-cert.pem'))).toBe(true);
+  });
+
+  it('retains certless retirement state when a detected target cannot be fingerprint-scanned', async () => {
+    const path = join(fixture(), 'ca');
+    await certificateFor(['localhost'], { caDir: path });
+    const caState = state(path);
+    caState.phase = 'retiring';
+    writeFileSync(
+      join(path, 'state.json'),
+      `${JSON.stringify(caState, null, 2)}\n`,
+    );
+    unlinkSync(join(path, 'ca-cert.pem'));
+    const adapter = fakeAdapter('macos-keychain', new Set(['default']));
+    const result = output();
+
+    await invoke(
+      createUninstallCommand(
+        dependencies(path, macEnvironmentWithNss(), [adapter]),
+      ),
+      { json: true },
+    );
+
+    expect(process.exitCode).toBe(1);
+    expect(adapter.uninstallCalls).toEqual([]);
+    expect(JSON.parse(result.stdout[0] ?? '')).toMatchObject({
+      results: [
+        {
+          store: 'macos-keychain',
+          target: 'default',
+          state: 'unknown',
+          error: { code: 'CA_UNREADABLE' },
+        },
+        {
+          store: 'nss',
+          target: '/tmp/firefox-profile',
+          state: 'unknown',
+          error: { code: 'UNSUPPORTED_PLATFORM' },
+        },
+      ],
+    });
+    expect(existsSync(join(path, 'state.json'))).toBe(true);
+    expect(existsSync(join(path, 'ca-key.pem'))).toBe(true);
+    expect(existsSync(join(path, 'ca-cert.pem'))).toBe(false);
+  });
+
   it('untrusts and retires a CA even when its signing key is damaged', async () => {
     const path = join(fixture(), 'ca');
     const adapter = fakeAdapter('macos-keychain');

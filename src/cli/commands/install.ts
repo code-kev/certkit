@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs';
 import { type CommandDef, defineCommand } from 'citty';
 import {
+  type LockOptions,
   readState,
   type StateFile,
   withLock,
@@ -28,6 +29,8 @@ import {
   targetTrustState,
   trustCaPath,
   uniqueTargets,
+  unsupportedTargetResult,
+  unsupportedTargetsMessage,
   warnWsl,
 } from './trust.js';
 
@@ -123,32 +126,30 @@ async function runInstall(
   const dir = deps.resolveCaDir();
   const certPath = trustCaPath(dir);
   const currentTargets = adapterTargets(environment, 'install');
+  const adapterMap = adaptersById(deps.adapterFactory(certPath, elevate));
   if (dryRun) {
     const state = readState(dir, fileOptions(deps));
     emitDryRun(
-      planInstall(currentTargets, certPath, existsSync(certPath)),
+      planInstall(
+        currentTargets.filter((target) => adapterMap.has(target.store)),
+        certPath,
+        existsSync(certPath),
+      ),
       json,
       (state?.pendingWrites ?? []).map((write) => ({
         store: write.store as TrustTarget['store'],
         target: write.target,
       })),
+      currentTargets.filter((target) => !adapterMap.has(target.store)),
     );
     process.exitCode = 0;
     return;
   }
 
-  const adapterMap = adaptersById(deps.adapterFactory(certPath, elevate));
-  for (const target of currentTargets) {
-    if (!adapterMap.has(target.store))
-      throw new CertkitError(
-        'UNSUPPORTED_PLATFORM',
-        `No ${target.store} trust adapter is available for ${target.target}. Use the documented manual trust command.`,
-      );
-  }
-
   const results: TrustResult[] = [];
   let failed = false;
-  const lockOptions = fileOptions(deps);
+  let unsupportedOnlyTargets: TrustTarget[] = [];
+  const lockOptions: LockOptions = fileOptions(deps);
   await withLock(
     dir,
     async () => {
@@ -158,12 +159,15 @@ async function runInstall(
         target: write.target,
       }));
       const targets = uniqueTargets([...currentTargets, ...pendingTargets]);
-      for (const target of pendingTargets) {
-        if (!adapterMap.has(target.store))
-          throw new CertkitError(
-            'UNSUPPORTED_PLATFORM',
-            `Cannot reconcile the recorded ${target.store} target ${target.target}; use the documented manual trust command.`,
-          );
+      if (
+        targets.length > 0 &&
+        !targets.some((target) => adapterMap.has(target.store))
+      ) {
+        results.push(...targets.map(unsupportedTargetResult));
+        failed = true;
+        unsupportedOnlyTargets = targets;
+        lockOptions.removeDirectoryIfEmpty = true;
+        return;
       }
 
       const material = await ensureCaForInstallLocked(dir, lockOptions);
@@ -177,7 +181,11 @@ async function runInstall(
           Boolean(pendingRecord(state, target)) ||
           Boolean(trustRecord(state, target));
         const adapter = adapterMap.get(target.store);
-        if (!adapter) continue;
+        if (!adapter) {
+          results.push(unsupportedTargetResult(target));
+          failed = true;
+          continue;
+        }
         const installed = await inspectInstalled(
           adapter,
           material.certPem,
@@ -293,12 +301,22 @@ async function runInstall(
           target,
         );
         results.push({ ...target, ...observed });
-        if (observed.state !== 'trusted') failed = true;
+        if (observed.state === 'untrusted') failed = true;
       }
     },
     lockOptions,
   );
 
+  if (unsupportedOnlyTargets.length > 0) {
+    emitFailure(
+      new CertkitError(
+        'UNSUPPORTED_PLATFORM',
+        unsupportedTargetsMessage(unsupportedOnlyTargets),
+      ),
+      json,
+    );
+    return;
+  }
   emitResults(results, json);
   process.exitCode = failed ? 1 : 0;
 }

@@ -1,4 +1,10 @@
-import { existsSync, lstatSync, readdirSync, unlinkSync } from 'node:fs';
+import {
+  existsSync,
+  lstatSync,
+  readdirSync,
+  rmdirSync,
+  unlinkSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { type CommandDef, defineCommand } from 'citty';
 import {
@@ -31,6 +37,8 @@ import {
   toErrorResult,
   trustCaPath,
   uniqueTargets,
+  unsupportedTargetResult,
+  unsupportedTargetsMessage,
   warnWsl,
 } from './trust.js';
 
@@ -110,8 +118,79 @@ function ownedCacheOrTemp(filename: string): boolean {
   );
 }
 
+function ownedTrustExportTempDirectory(filename: string): boolean {
+  return /^\.certkit-trust-[a-z\d]{6}$/i.test(filename);
+}
+
 function hasOrphanedOwnedFiles(dir: string): boolean {
-  return readdirSync(dir).some(ownedCacheOrTemp);
+  return readdirSync(dir).some(
+    (filename) =>
+      ownedCacheOrTemp(filename) || ownedTrustExportTempDirectory(filename),
+  );
+}
+
+function removeTrustExportTempDirectory(
+  dir: string,
+  filename: string,
+  dependencies: TrustCommandDependencies,
+): void {
+  const exportDir = join(dir, filename);
+  let directoryStat: ReturnType<typeof lstatSync>;
+  try {
+    directoryStat = lstatSync(exportDir);
+  } catch (error) {
+    throw new CertkitError(
+      'CA_UNREADABLE',
+      `Could not inspect interrupted trust export directory ${exportDir}.`,
+      { cause: error },
+    );
+  }
+  const currentUid = process.getuid?.();
+  if (
+    directoryStat.isSymbolicLink() ||
+    !directoryStat.isDirectory() ||
+    (process.platform !== 'win32' &&
+      ((directoryStat.mode & 0o777) !== 0o700 ||
+        (currentUid !== undefined && directoryStat.uid !== currentUid)))
+  )
+    throw new CertkitError(
+      'CA_UNREADABLE',
+      `Refusing to remove an unsafe interrupted trust export directory: ${exportDir}`,
+    );
+
+  dependencies.fsGuard?.assertProtectedDirectory(exportDir);
+  const entries = readdirSync(exportDir);
+  if (entries.some((entry) => entry !== 'admin-settings.plist'))
+    throw new CertkitError(
+      'CA_UNREADABLE',
+      `Refusing to remove unexpected contents from interrupted trust export directory: ${exportDir}`,
+    );
+  if (entries.length === 1) {
+    const exportPath = join(exportDir, 'admin-settings.plist');
+    const exportStat = lstatSync(exportPath);
+    if (
+      exportStat.isSymbolicLink() ||
+      !exportStat.isFile() ||
+      (process.platform !== 'win32' &&
+        process.getuid?.() !== undefined &&
+        exportStat.uid !== process.getuid?.())
+    )
+      throw new CertkitError(
+        'CA_UNREADABLE',
+        `Refusing to remove an unsafe interrupted trust export file: ${exportPath}`,
+      );
+    dependencies.fsGuard?.assertProtectedFile(exportPath);
+    unlinkSync(exportPath);
+  }
+  try {
+    rmdirSync(exportDir);
+  } catch (error) {
+    throw new CertkitError(
+      'CA_UNREADABLE',
+      `Could not remove interrupted trust export directory ${exportDir}.`,
+      { cause: error },
+    );
+  }
 }
 
 function removeOwnedFile(
@@ -178,12 +257,21 @@ async function removeOwnedFiles(
   const names = readdirSync(dir);
   const ordered = [
     ...names.filter(ownedCacheOrTemp),
+    ...names.filter(ownedTrustExportTempDirectory),
     'ca-key.pem',
     'ca-cert.pem',
     'state.json',
   ];
   for (const filename of ordered) {
     if (!names.includes(filename)) continue;
+    if (ownedTrustExportTempDirectory(filename)) {
+      removeTrustExportTempDirectory(dir, filename, dependencies);
+      await emitEvent(dependencies, {
+        type: 'uninstall:file-removed',
+        filename,
+      });
+      continue;
+    }
     if (removeOwnedFile(dir, filename, dependencies)) {
       await emitEvent(
         dependencies,
@@ -206,6 +294,7 @@ async function runUninstall(
   const dir = deps.resolveCaDir();
   const certPath = trustCaPath(dir);
   const currentTargets = adapterTargets(environment, 'uninstall');
+  const adapterMap = adaptersById(deps.adapterFactory(certPath, elevate));
   if (dryRun) {
     const state = readState(dir, fileOptions(deps));
     const targets = uniqueTargets([
@@ -213,12 +302,18 @@ async function runUninstall(
       ...(state ? caRecordTargets(state) : []),
     ]);
     emitDryRun(
-      planUninstall(targets, certPath, existsSync(certPath), state?.ca.sha256),
+      planUninstall(
+        targets.filter((target) => adapterMap.has(target.store)),
+        certPath,
+        existsSync(certPath),
+        state?.ca.sha256,
+      ),
       json,
       (state?.pendingWrites ?? []).map((write) => ({
         store: write.store as TrustTarget['store'],
         target: write.target,
       })),
+      targets.filter((target) => !adapterMap.has(target.store)),
     );
     process.exitCode = 0;
     return;
@@ -230,9 +325,9 @@ async function runUninstall(
     return;
   }
 
-  const adapterMap = adaptersById(deps.adapterFactory(certPath, elevate));
   const results: TrustResult[] = [];
   let failed = false;
+  let unsupportedOnlyTargets: TrustTarget[] = [];
   const lockOptions: LockOptions = fileOptions(deps);
   await withLock(
     dir,
@@ -252,12 +347,38 @@ async function runUninstall(
         ...currentTargets,
         ...caRecordTargets(state),
       ]);
-      for (const target of targets) {
-        if (!adapterMap.has(target.store))
-          throw new CertkitError(
-            'UNSUPPORTED_PLATFORM',
-            `Cannot remove the recorded ${target.store} target ${target.target}; use the documented manual trust command.`,
+      if (
+        targets.length > 0 &&
+        !targets.some((target) => adapterMap.has(target.store))
+      ) {
+        results.push(...targets.map(unsupportedTargetResult));
+        failed = true;
+        unsupportedOnlyTargets = targets;
+        return;
+      }
+      if (!material.certPem) {
+        const unsupportedTargets = targets.filter(
+          (target) => !adapterMap.has(target.store),
+        );
+        if (unsupportedTargets.length > 0) {
+          results.push(
+            ...targets.map((target) =>
+              !adapterMap.has(target.store)
+                ? unsupportedTargetResult(target)
+                : {
+                    ...target,
+                    state: 'unknown' as const,
+                    error: {
+                      code: 'CA_UNREADABLE' as const,
+                      message:
+                        'The CA certificate is missing, so this detected target cannot be fingerprint-scanned; recovery state was retained.',
+                    },
+                  },
+            ),
           );
+          failed = true;
+          return;
+        }
       }
 
       let stateChanged = false;
@@ -276,7 +397,11 @@ async function runUninstall(
       if (material.certPem) {
         for (const target of targets) {
           const adapter = adapterMap.get(target.store);
-          if (!adapter) continue;
+          if (!adapter) {
+            results.push(unsupportedTargetResult(target));
+            failed = true;
+            continue;
+          }
           try {
             await adapter.uninstall(material.certPem, target.target);
             const present = await inspectInstalled(
@@ -334,6 +459,16 @@ async function runUninstall(
     lockOptions,
   );
 
+  if (unsupportedOnlyTargets.length > 0) {
+    emitFailure(
+      new CertkitError(
+        'UNSUPPORTED_PLATFORM',
+        unsupportedTargetsMessage(unsupportedOnlyTargets),
+      ),
+      json,
+    );
+    return;
+  }
   emitResults(results, json);
   process.exitCode = failed ? 1 : 0;
 }

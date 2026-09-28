@@ -1,5 +1,6 @@
 import { X509Certificate } from 'node:crypto';
 import { mkdtemp, readFile, rm, rmdir } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { CertkitError } from '../core/errors.js';
 import type { Environment } from './detect.js';
@@ -98,13 +99,12 @@ export function macosDeleteCertificateArgv(sha256: string): string[] {
 
 async function adminTrustContains(
   run: Command,
-  caCertPath: string,
   sha1: string,
 ): Promise<boolean> {
   // Uninstall may export settings for verification; read-only status never does.
-  const exportDir = await mkdtemp(
-    path.join(path.dirname(caCertPath), '.certkit-trust-'),
-  );
+  // Keep exported trust policy outside the CA directory: a process crash must
+  // not strand an unrecognized directory that blocks retirement cleanup.
+  const exportDir = await mkdtemp(path.join(tmpdir(), 'certkit-trust-'));
   const exportPath = path.join(exportDir, 'admin-settings.plist');
   try {
     const result = await run([
@@ -296,13 +296,13 @@ export function createMacosAdapter(
             'Could not read the macOS System keychain; CA recovery data was retained.',
           );
 
-        if (await adminTrustContains(run, caCertPath, identity.sha1)) {
+        if (await adminTrustContains(run, identity.sha1)) {
           const removed = await elevate(macosRemoveTrustArgv(caCertPath));
           if (removed.code !== 0)
             throw storeWriteFailure(
               'Could not remove the macOS admin trust setting; CA recovery data was retained.',
             );
-          if (await adminTrustContains(run, caCertPath, identity.sha1))
+          if (await adminTrustContains(run, identity.sha1))
             throw storeWriteFailure(
               'The macOS admin trust setting remains after removal; CA recovery data was retained.',
             );
