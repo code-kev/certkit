@@ -1,6 +1,7 @@
 import { X509Certificate } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { existsSync } from 'node:fs';
+import { mkdir, readFile } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
 import { CertkitError } from '../core/errors.js';
 import type { Environment } from './detect.js';
 import { type RunResult, resolveNssCertutil } from './run.js';
@@ -8,10 +9,26 @@ import type { StoreAdapter } from './store.js';
 
 type Command = (argv: string[]) => Promise<RunResult>;
 
+interface NssAdapterFs {
+  mkdir: (
+    path: string,
+    options: { recursive: true; mode: number },
+  ) => Promise<unknown>;
+  hasDatabaseFile: (target: string) => boolean;
+}
+
 interface NssAdapterDependencies {
   run: Command;
   resolveCertutil?: () => Promise<string | null>;
+  fs?: NssAdapterFs;
 }
+
+const defaultFs: NssAdapterFs = {
+  mkdir: (path, options) => mkdir(path, options),
+  hasDatabaseFile: (target) =>
+    existsSync(join(target, 'cert9.db')) ||
+    existsSync(join(target, 'cert8.db')),
+};
 
 const DEFAULT_TARGET = 'default';
 const SYSTEM_NSS_DB = '/etc/pki/nssdb';
@@ -74,6 +91,7 @@ function assertWritableTarget(target: string): void {
 export function createNssAdapter(
   dependencies: NssAdapterDependencies,
 ): StoreAdapter {
+  const fs: NssAdapterFs = dependencies.fs ?? defaultFs;
   let certutil: Promise<string | null> | undefined;
   const resolveCertutil = () =>
     (certutil ??= (dependencies.resolveCertutil ?? resolveNssCertutil)());
@@ -82,6 +100,17 @@ export function createNssAdapter(
     if (!executable)
       throw new CertkitError('UNSUPPORTED_PLATFORM', manualCertutil);
     return dependencies.run([executable, ...args]);
+  };
+  const ensureDatabaseDirectory = async (target: string): Promise<void> => {
+    if (!(await resolveCertutil()))
+      throw new CertkitError('UNSUPPORTED_PLATFORM', manualCertutil);
+    try {
+      await fs.mkdir(target, { recursive: true, mode: 0o700 });
+    } catch {
+      throw writeFailure(
+        'Could not initialize the NSS database directory; no certificate was added.',
+      );
+    }
   };
   const listing = (target: string) =>
     command(['-L', '-d', sqlDatabase(target)]);
@@ -142,6 +171,12 @@ export function createNssAdapter(
     async inspectInstalled(caCertPem, target) {
       try {
         const nickname = nssCertificateNickname(caCertPem);
+        // certutil exits non-zero with SEC_ERROR_BAD_DATABASE for a directory
+        // that exists but holds no database yet (a prospective Chromium target
+        // or an import interrupted before initialization). That is an absent
+        // certificate, not an uninspectable database; treat a missing database
+        // file as absent so install can initialize it and retries can recover.
+        if (!fs.hasDatabaseFile(target)) return 'absent';
         const listed = await listing(target);
         if (listed.code !== 0) return 'inconclusive';
         const rows = nicknameRows(listed.stdout, nickname);
@@ -224,6 +259,7 @@ export function createNssAdapter(
       try {
         const caCertPem = await readFile(caCertPath, 'utf8');
         const nickname = nssCertificateNickname(caCertPem);
+        await ensureDatabaseDirectory(target);
         await removePriorExactCertificate(caCertPem, nickname, target);
         const added = await command([
           '-A',

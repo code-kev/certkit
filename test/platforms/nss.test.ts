@@ -55,7 +55,11 @@ function fingerprint(pem: string): string {
 }
 
 const adapter = (run: (argv: string[]) => Promise<RunResult>) =>
-  createNssAdapter({ run, resolveCertutil: async () => certutil });
+  createNssAdapter({
+    run,
+    resolveCertutil: async () => certutil,
+    fs: { mkdir: async () => {}, hasDatabaseFile: () => true },
+  });
 
 afterEach(async () => {
   for (const root of roots.splice(0))
@@ -259,6 +263,92 @@ describe('NSS store adapter', () => {
     expect(calls.some((argv) => argv[1] === '-D')).toBe(true);
   });
 
+  it('initializes a prospective database directory before importing', async () => {
+    const { dir, ca } = await fixture();
+    const caPath = join(dir, 'ca.pem');
+    await writeFile(caPath, ca);
+    const target = join(dir, 'pki', 'nssdb');
+    const created: Array<{ path: string; mode: number }> = [];
+    const calls: string[][] = [];
+    const nickname = nssCertificateNickname(ca);
+    let initialized = false;
+    let added = false;
+    const instance = createNssAdapter({
+      resolveCertutil: async () => certutil,
+      fs: {
+        async mkdir(path, options) {
+          created.push({ path, mode: options.mode });
+          initialized = true;
+        },
+        hasDatabaseFile: () => initialized && added,
+      },
+      async run(argv) {
+        calls.push(argv);
+        if (argv[1] === '-A') {
+          if (!initialized) return result('', 255);
+          added = true;
+          return result();
+        }
+        if (argv.includes('-n')) return result(added ? ca : '', added ? 0 : 1);
+        return result(
+          added
+            ? listing(nickname)
+            : (listing(nickname).split(nickname)[0] ?? ''),
+        );
+      },
+    });
+
+    await expect(instance.install(caPath, target)).resolves.toEqual({
+      state: 'verified',
+    });
+    expect(created).toEqual([{ path: target, mode: 0o700 }]);
+  });
+
+  it('treats an uninitialized database directory as absent so a retry can recover', async () => {
+    const { dir, ca } = await fixture();
+    const caPath = join(dir, 'ca.pem');
+    await writeFile(caPath, ca);
+    const target = join(dir, 'pki', 'nssdb');
+    const calls: string[][] = [];
+    const nickname = nssCertificateNickname(ca);
+    let database = false;
+    let added = false;
+    const instance = createNssAdapter({
+      resolveCertutil: async () => certutil,
+      fs: {
+        mkdir: async () => {
+          database = true;
+        },
+        hasDatabaseFile: () => database,
+      },
+      async run(argv) {
+        calls.push(argv);
+        if (argv[1] === '-A') {
+          database = true;
+          added = true;
+          return result();
+        }
+        if (argv[1] === '-D') {
+          added = false;
+          return result();
+        }
+        if (argv.includes('-n')) return result(added ? ca : '', added ? 0 : 1);
+        return result(
+          added
+            ? listing(nickname)
+            : (listing(nickname).split(nickname)[0] ?? ''),
+        );
+      },
+    });
+
+    await expect(instance.inspectInstalled(ca, target)).resolves.toBe('absent');
+    expect(calls).toEqual([]);
+    await expect(instance.install(caPath, target)).resolves.toEqual({
+      state: 'verified',
+    });
+    expect(calls.some((argv) => argv[1] === '-A')).toBe(true);
+  });
+
   it('never writes /etc/pki/nssdb and gives manual instructions when certutil is missing', async () => {
     const { dir, ca } = await fixture();
     const caPath = join(dir, 'ca.pem');
@@ -287,6 +377,7 @@ describe('NSS store adapter', () => {
         return result();
       },
       resolveCertutil: async () => null,
+      fs: { mkdir: async () => {}, hasDatabaseFile: () => true },
     });
     await expect(missing.install(caPath, '/profile')).rejects.toMatchObject({
       code: 'UNSUPPORTED_PLATFORM',
