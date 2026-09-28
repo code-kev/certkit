@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
+import { performance } from 'node:perf_hooks';
 
 const entryPath = new URL('../dist/index.js', import.meta.url);
 const reflectPath = new URL('../dist/reflect-metadata.js', import.meta.url);
@@ -37,3 +38,17 @@ for (const coreImport of coreImports)
     cli.indexOf(cliShim[0] ?? '') < cli.indexOf(coreImport),
     'dist/cli/index.js must load reflect-metadata before certificate core',
   );
+
+await import('certkit/vite');
+performance.mark('certkit-vite-import-start');
+await import('certkit/vite');
+performance.mark('certkit-vite-import-end');
+performance.measure(
+  'certkit-vite-import',
+  'certkit-vite-import-start',
+  'certkit-vite-import-end',
+);
+assert.ok(
+  performance.getEntriesByName('certkit-vite-import').at(-1).duration < 100,
+  'warm import of certkit/vite must take less than 100 ms',
+);
