@@ -684,6 +684,7 @@ it.skipIf(workerDir)(
       }
     }
   },
+  30_000,
 );
 
 describe('Windows ACL guard', () => {

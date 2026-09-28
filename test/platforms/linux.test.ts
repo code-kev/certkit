@@ -95,23 +95,41 @@ async function fixture(): Promise<{
         );
       }
     },
-    fs: {
-      async readFile(path) {
-        const value = files.get(path);
-        return value ?? readFile(path, 'utf8');
-      },
-      async lstat(path) {
-        if (files.has(path))
-          return { isFile: () => true, isSymbolicLink: () => false };
-        return lstat(path);
-      },
-    },
+    fs: fixtureFs(files, caCertPath),
   });
   return { caCertPath, ca, other, files, commands, adapter };
 }
 
 function result(stdout = '', code = 0): RunResult {
   return { code, stdout, stderr: '' };
+}
+
+function missingError(path: string): NodeJS.ErrnoException {
+  const error = new Error(
+    `ENOENT: no such file or directory, open '${path}'`,
+  ) as NodeJS.ErrnoException;
+  error.code = 'ENOENT';
+  return error;
+}
+
+function fixtureFs(
+  files: Map<string, string>,
+  caCertPath: string,
+): NonNullable<Parameters<typeof createLinuxAdapter>[0]['fs']> {
+  return {
+    async readFile(path) {
+      const value = files.get(path);
+      if (value !== undefined) return value;
+      if (path === caCertPath) return readFile(path, 'utf8');
+      throw missingError(path);
+    },
+    async lstat(path) {
+      if (files.has(path))
+        return { isFile: () => true, isSymbolicLink: () => false };
+      if (path === caCertPath) return lstat(path);
+      throw missingError(path);
+    },
+  };
 }
 
 describe('Linux system trust adapter', () => {
@@ -177,16 +195,7 @@ describe('Linux system trust adapter', () => {
           files.delete(argv[3] ?? '');
         } else throw new Error('rebuild failed');
       },
-      fs: {
-        async readFile(path) {
-          return files.get(path) ?? readFile(path, 'utf8');
-        },
-        async lstat(path) {
-          if (files.has(path))
-            return { isFile: () => true, isSymbolicLink: () => false };
-          return lstat(path);
-        },
-      },
+      fs: fixtureFs(files, caCertPath),
     });
 
     await expect(
