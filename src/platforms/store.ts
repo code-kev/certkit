@@ -2,6 +2,10 @@ import type { Environment } from './detect.js';
 
 export interface StoreAdapter {
   id: 'macos-keychain' | 'windows-root' | 'linux-system' | 'nss';
+  inspectInstalled(
+    caCertPem: string,
+    target: string,
+  ): Promise<'present' | 'absent' | 'inconclusive'>;
   checkTrust(
     caCertPem: string,
     env: Environment,

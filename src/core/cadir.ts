@@ -7,6 +7,7 @@ import {
   openSync,
   readFileSync,
   renameSync,
+  rmdirSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -53,6 +54,7 @@ export interface FileOptions {
 
 export interface LockOptions extends FileOptions {
   timeoutMs?: number;
+  removeDirectoryIfEmpty?: boolean;
 }
 
 interface LockFile {
@@ -116,6 +118,15 @@ function isMissing(error: unknown): boolean {
     error !== null &&
     'code' in error &&
     error.code === 'ENOENT'
+  );
+}
+
+function isNotEmpty(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    (error.code === 'ENOTEMPTY' || error.code === 'EEXIST')
   );
 }
 
@@ -563,6 +574,17 @@ export async function withLock<T>(
       unlinkSync(path);
     } catch (error) {
       releaseError ??= error;
+    }
+    if (
+      releaseError === undefined &&
+      operation.ok &&
+      options.removeDirectoryIfEmpty
+    ) {
+      try {
+        rmdirSync(dir);
+      } catch (error) {
+        if (!isMissing(error) && !isNotEmpty(error)) releaseError = error;
+      }
     }
   }
   if (releaseError !== undefined)

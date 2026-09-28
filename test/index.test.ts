@@ -129,6 +129,7 @@ describe('status', () => {
       },
     ];
     writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`);
+    const beforeStatus = readFileSync(statePath);
 
     await expect(status({ caDir })).resolves.toEqual({
       caDir,
@@ -149,6 +150,7 @@ describe('status', () => {
         { store: 'nss', state: 'not-detected' },
       ],
     });
+    expect(readFileSync(statePath)).toEqual(beforeStatus);
     expect(createMacosAdapter).toHaveBeenCalledOnce();
   });
 

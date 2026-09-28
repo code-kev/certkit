@@ -57,6 +57,11 @@ export interface CaStatusMaterial {
   readonly certPem: string;
 }
 
+export interface CaUninstallMaterial {
+  readonly state: StateFile;
+  readonly certPem: string | null;
+}
+
 interface LockedContext extends FileOptions {
   dir: string;
 }
@@ -230,22 +235,9 @@ function validatedCa(
   dir: string,
 ): CaMaterial {
   try {
-    const cert = new X509Certificate(certPem);
-    const nativeCert = new NodeX509Certificate(certPem);
-    const fingerprint = createHash('sha256')
-      .update(nativeCert.raw)
-      .digest('hex');
-    if (
-      !nativeCert.ca ||
-      nativeCert.issuer !== nativeCert.subject ||
-      !nativeCert.verify(nativeCert.publicKey) ||
-      !keyMatchesCertificate(keyPem, certPem) ||
-      state.ca.subject !== cert.subject ||
-      state.ca.serial.toLowerCase() !== cert.serialNumber.toLowerCase() ||
-      state.ca.sha256.toLowerCase() !== fingerprint ||
-      state.ca.expiresAt !== cert.notAfter.toISOString()
-    ) {
-      throw new Error('CA key, certificate, and state metadata do not match');
+    const cert = validatedCaIdentity(state, certPem, dir);
+    if (!keyMatchesCertificate(keyPem, certPem)) {
+      throw new Error('CA key and certificate do not match');
     }
     return {
       keyPem,
@@ -256,6 +248,34 @@ function validatedCa(
     };
   } catch (cause) {
     throw unreadable(dir, 'CA key, certificate, or state is invalid', cause);
+  }
+}
+
+function validatedCaIdentity(
+  state: StateFile,
+  certPem: string,
+  dir: string,
+): X509Certificate {
+  try {
+    const cert = new X509Certificate(certPem);
+    const nativeCert = new NodeX509Certificate(certPem);
+    const fingerprint = createHash('sha256')
+      .update(nativeCert.raw)
+      .digest('hex');
+    if (
+      !nativeCert.ca ||
+      nativeCert.issuer !== nativeCert.subject ||
+      !nativeCert.verify(nativeCert.publicKey) ||
+      state.ca.subject !== cert.subject ||
+      state.ca.serial.toLowerCase() !== cert.serialNumber.toLowerCase() ||
+      state.ca.sha256.toLowerCase() !== fingerprint ||
+      state.ca.expiresAt !== cert.notAfter.toISOString()
+    ) {
+      throw new Error('CA certificate and state metadata do not match');
+    }
+    return cert;
+  } catch (cause) {
+    throw unreadable(dir, 'CA certificate or state is invalid', cause);
   }
 }
 
@@ -619,6 +639,43 @@ export function readCaForStatus(
   if (!keyPem || !certPem)
     throw unreadable(dir, 'CA key or certificate is missing');
   validatedCa(state, keyPem, certPem, dir);
+  return { state, certPem };
+}
+
+export async function ensureCaForInstallLocked(
+  dir: string,
+  options: FileOptions = {},
+): Promise<CaStatusMaterial> {
+  const { state, material } = await loadCa(dir, options.fsGuard);
+  return { state, certPem: material.certPem };
+}
+
+export function readCaForUninstallLocked(
+  dir: string,
+  options: FileOptions = {},
+): CaUninstallMaterial | null {
+  const state = readState(dir, options);
+  if (!state) {
+    if (existingEntry(dir, 'ca-key.pem') || existingEntry(dir, 'ca-cert.pem'))
+      throw unreadable(dir, 'CA material exists without a state file');
+    return null;
+  }
+
+  const certPem = readCaFile(dir, 'ca-cert.pem', options.fsGuard);
+  if (
+    !certPem &&
+    (state.trustWrites.length > 0 || state.pendingWrites.length > 0)
+  )
+    throw unreadable(
+      dir,
+      'CA certificate is missing while trust-removal records remain; use the manual fingerprint-based recovery path',
+    );
+  if (state.phase === 'active') {
+    if (!certPem) throw unreadable(dir, 'Active CA certificate is missing');
+    validatedCaIdentity(state, certPem, dir);
+  } else if (state.phase === 'retiring') {
+    if (certPem) validatedCaIdentity(state, certPem, dir);
+  } else if (certPem) validatedCaIdentity(state, certPem, dir);
   return { state, certPem };
 }
 

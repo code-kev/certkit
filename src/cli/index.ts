@@ -3,13 +3,17 @@ import '../reflect-metadata.js';
 import { defineCommand, renderUsage, runMain } from 'citty';
 import { carootCommand } from './commands/caroot.js';
 import { createCommand } from './commands/create.js';
+import { installCommand } from './commands/install.js';
 import { statusCommand } from './commands/status.js';
+import { uninstallCommand } from './commands/uninstall.js';
 import { cliVersion, setGlobalOptions } from './options.js';
 
 const commands = {
   caroot: carootCommand,
   create: createCommand,
+  install: installCommand,
   status: statusCommand,
+  uninstall: uninstallCommand,
 };
 const main = defineCommand({
   meta: {

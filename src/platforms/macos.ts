@@ -75,6 +75,27 @@ function assertDefaultTarget(target: string): void {
     );
 }
 
+export function macosInstallArgv(caCertPath: string): string[] {
+  return [
+    'security',
+    'add-trusted-cert',
+    '-d',
+    '-r',
+    'trustRoot',
+    '-k',
+    SYSTEM_KEYCHAIN,
+    caCertPath,
+  ];
+}
+
+export function macosRemoveTrustArgv(caCertPath: string): string[] {
+  return ['security', 'remove-trusted-cert', '-d', caCertPath];
+}
+
+export function macosDeleteCertificateArgv(sha256: string): string[] {
+  return ['security', 'delete-certificate', '-Z', sha256, SYSTEM_KEYCHAIN];
+}
+
 async function adminTrustContains(
   run: Command,
   caCertPath: string,
@@ -119,6 +140,21 @@ export function createMacosAdapter(
   const { caCertPath, run, elevate } = dependencies;
   return {
     id: 'macos-keychain',
+
+    async inspectInstalled(caCertPem, target) {
+      assertDefaultTarget(target);
+      try {
+        const { sha256 } = certificateHashes(caCertPem);
+        const present = await findCertificate(run, sha256, SYSTEM_KEYCHAIN);
+        return present === undefined
+          ? 'inconclusive'
+          : present
+            ? 'present'
+            : 'absent';
+      } catch {
+        return 'inconclusive';
+      }
+    },
 
     async checkTrust(caCertPem: string, env: Environment) {
       if (
@@ -208,16 +244,7 @@ export function createMacosAdapter(
         const { sha256 } = certificateHashes(
           await readFile(caCertPath, 'utf8'),
         );
-        const added = await elevate([
-          'security',
-          'add-trusted-cert',
-          '-d',
-          '-r',
-          'trustRoot',
-          '-k',
-          SYSTEM_KEYCHAIN,
-          caCertPath,
-        ]);
+        const added = await elevate(macosInstallArgv(caCertPath));
         if (added.code !== 0)
           throw storeWriteFailure(
             'Could not add the CA to the macOS System keychain; rerun `certkit install` or use the manual trust command.',
@@ -270,12 +297,7 @@ export function createMacosAdapter(
           );
 
         if (await adminTrustContains(run, caCertPath, identity.sha1)) {
-          const removed = await elevate([
-            'security',
-            'remove-trusted-cert',
-            '-d',
-            caCertPath,
-          ]);
+          const removed = await elevate(macosRemoveTrustArgv(caCertPath));
           if (removed.code !== 0)
             throw storeWriteFailure(
               'Could not remove the macOS admin trust setting; CA recovery data was retained.',
@@ -287,13 +309,9 @@ export function createMacosAdapter(
         }
 
         if (systemHasCa) {
-          const deleted = await elevate([
-            'security',
-            'delete-certificate',
-            '-Z',
-            identity.sha256,
-            SYSTEM_KEYCHAIN,
-          ]);
+          const deleted = await elevate(
+            macosDeleteCertificateArgv(identity.sha256),
+          );
           if (deleted.code !== 0)
             throw storeWriteFailure(
               'Could not delete the CA from the macOS System keychain; CA recovery data was retained.',
