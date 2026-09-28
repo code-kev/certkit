@@ -306,6 +306,25 @@ describe('Linux system trust adapter', () => {
     ).resolves.toBe('absent');
   });
 
+  it('refuses to remove an anchor that contains another certificate', async () => {
+    const { caCertPath, ca, other, files, commands, adapter } = await fixture();
+    const target = linuxAnchorTarget(caCertPath, 'update-ca-trust');
+    await adapter.install(caCertPath, target, 'update-ca-trust');
+    const mixedAnchor = `${ca}\n${other}`;
+    files.set(target, mixedAnchor);
+    commands.length = 0;
+
+    await expect(
+      adapter.uninstall(ca, target, 'update-ca-trust'),
+    ).rejects.toMatchObject({
+      code: 'STORE_WRITE_FAILED',
+      message: expect.stringMatching(/manual|inspect/i),
+    });
+
+    expect(files.get(target)).toBe(mixedAnchor);
+    expect(commands).toEqual([]);
+  });
+
   it('removes a trust anchor by its exact path and skips removal when already absent', async () => {
     const { caCertPath, commands, adapter } = await fixture();
     const target = linuxAnchorTarget(caCertPath, 'trust-anchor');

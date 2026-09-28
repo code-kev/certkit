@@ -41,14 +41,19 @@ function fingerprint(pem: string): string {
     .toLowerCase();
 }
 
-function fingerprints(contents: string): Set<string> | undefined {
+function certificateFingerprints(contents: string): string[] | undefined {
   const certificates = contents.match(pemCertificate) ?? [];
   if (contents.replace(pemCertificate, '').trim()) return undefined;
   try {
-    return new Set(certificates.map(fingerprint));
+    return certificates.map(fingerprint);
   } catch {
     return undefined;
   }
+}
+
+function fingerprints(contents: string): Set<string> | undefined {
+  const values = certificateFingerprints(contents);
+  return values === undefined ? undefined : new Set(values);
 }
 
 function missing(error: unknown): boolean {
@@ -187,9 +192,9 @@ export function createLinuxAdapter(
     const contents = await readAnchor(target);
     if (contents === null) return 'absent';
     if (contents === undefined) return 'inconclusive';
-    const hashes = fingerprints(contents);
-    if (!hashes) return 'different';
-    return hashes.has(fingerprint(caCertPem)) ? 'present' : 'different';
+    const hashes = certificateFingerprints(contents);
+    if (!hashes || hashes.length !== 1) return 'different';
+    return hashes[0] === fingerprint(caCertPem) ? 'present' : 'different';
   };
   const elevateCommands = async (
     commands: string[][],
@@ -394,6 +399,10 @@ export function createLinuxAdapter(
             throw writeFailure(
               'The Linux anchor target could not be inspected; recovery data was retained.',
             );
+          if (anchor === 'different')
+            throw writeFailure(
+              'The Linux anchor target does not contain exactly the recorded CA certificate; no file was removed. Inspect it manually, then rerun `certkit uninstall`; recovery data was retained.',
+            );
           if (anchor === 'present')
             await elevateCommands(
               [['rm', '--', target]],
@@ -406,6 +415,10 @@ export function createLinuxAdapter(
           if (temporary === 'inconclusive')
             throw writeFailure(
               'The temporary Linux anchor target could not be inspected; recovery data was retained.',
+            );
+          if (temporary === 'different')
+            throw writeFailure(
+              'The temporary Linux anchor target does not contain exactly the recorded CA certificate; no file was removed. Inspect it manually, then rerun `certkit uninstall`; recovery data was retained.',
             );
           if (temporary === 'present')
             await elevateCommands(
