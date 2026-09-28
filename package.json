@@ -9,7 +9,8 @@
   },
   "packageManager": "pnpm@10.34.5",
   "sideEffects": [
-    "./dist/reflect-metadata.js"
+    "./dist/reflect-metadata.js",
+    "./src/reflect-metadata.ts"
   ],
   "exports": {
     ".": {

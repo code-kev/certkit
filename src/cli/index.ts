@@ -1,10 +1,16 @@
 #!/usr/bin/env node
+import '../reflect-metadata.js';
 import { defineCommand, renderUsage, runMain } from 'citty';
 import { carootCommand } from './commands/caroot.js';
+import { createCommand } from './commands/create.js';
 import { statusCommand } from './commands/status.js';
 import { cliVersion, setGlobalOptions } from './options.js';
 
-const commands = { caroot: carootCommand, status: statusCommand };
+const commands = {
+  caroot: carootCommand,
+  create: createCommand,
+  status: statusCommand,
+};
 const main = defineCommand({
   meta: {
     name: 'certkit',
