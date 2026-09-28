@@ -5,6 +5,7 @@ export interface StoreAdapter {
   inspectInstalled(
     caCertPem: string,
     target: string,
+    mechanism?: string,
   ): Promise<'present' | 'absent' | 'inconclusive'>;
   checkTrust(
     caCertPem: string,
@@ -19,6 +20,11 @@ export interface StoreAdapter {
   install(
     caCertPath: string,
     target: string,
+    mechanism?: string,
   ): Promise<{ state: 'verified' | 'inconclusive'; detail?: string }>;
-  uninstall(caCertPem: string, target: string): Promise<void>;
+  uninstall(
+    caCertPem: string,
+    target: string,
+    mechanism?: string,
+  ): Promise<void>;
 }

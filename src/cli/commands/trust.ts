@@ -7,6 +7,13 @@ import { CertkitError, type ErrorCode } from '../../core/errors.js';
 import { detect, type Environment } from '../../platforms/detect.js';
 import { createWindowsFsGuard } from '../../platforms/fsguard.js';
 import {
+  createLinuxAdapter,
+  isLinuxTrustMechanism,
+  linuxAnchorTarget,
+  linuxInstallArgv,
+  linuxUninstallArgv,
+} from '../../platforms/linux.js';
+import {
   createMacosAdapter,
   macosDeleteCertificateArgv,
   macosInstallArgv,
@@ -27,6 +34,7 @@ export type TrustStore = StoreAdapter['id'];
 export interface TrustTarget {
   store: TrustStore;
   target: string;
+  mechanism?: string;
 }
 
 export type TrustLifecycleEvent =
@@ -57,6 +65,17 @@ export interface TrustResult {
   detail?: string;
 }
 
+export function trustTarget(
+  store: TrustStore,
+  target: string,
+  mechanism?: string,
+): TrustTarget {
+  const value = { store, target } as TrustTarget;
+  if (mechanism)
+    Object.defineProperty(value, 'mechanism', { value: mechanism });
+  return value;
+}
+
 export interface DryRunCommand {
   store: TrustStore;
   target: string;
@@ -69,10 +88,15 @@ interface DryRunUncertainty extends TrustTarget {
   detail: string;
 }
 
-function defaultAdapterFactory(caCertPath: string): StoreAdapter[] {
+function defaultAdapterFactory(
+  caCertPath: string,
+  elevateCommand: typeof elevate,
+): StoreAdapter[] {
   if (process.platform === 'darwin')
     return [createMacosAdapter({ caCertPath, run })];
   if (process.platform === 'win32') return [createWindowsAdapter({ run })];
+  if (process.platform === 'linux')
+    return [createLinuxAdapter({ caCertPath, run, elevate: elevateCommand })];
   return [];
 }
 
@@ -94,6 +118,7 @@ export function adaptersById(
 export function adapterTargets(
   environment: Environment,
   action: 'install' | 'uninstall',
+  caCertPath?: string,
 ): TrustTarget[] {
   const targets: TrustTarget[] = [];
   for (const store of environment.stores) {
@@ -103,6 +128,13 @@ export function adapterTargets(
           ? (store.installTargets ?? [])
           : (store.targets ?? []);
       for (const target of values) targets.push({ store: store.store, target });
+    } else if (store.store === 'linux-system' && store.detected) {
+      const mechanism = store.detail;
+      const target =
+        caCertPath && isLinuxTrustMechanism(mechanism)
+          ? linuxAnchorTarget(caCertPath, mechanism)
+          : 'default';
+      targets.push(trustTarget(store.store, target, mechanism));
     } else if (store.detected) {
       targets.push({ store: store.store, target: 'default' });
     }
@@ -114,7 +146,11 @@ export function caRecordTargets(state: StateFile): TrustTarget[] {
   const writes = [...state.trustWrites, ...state.pendingWrites];
   const targets = new Map<string, TrustTarget>();
   for (const write of writes) {
-    const target = { store: write.store as TrustStore, target: write.target };
+    const target = trustTarget(
+      write.store as TrustStore,
+      write.target,
+      write.mechanism,
+    );
     targets.set(`${target.store}\0${target.target}`, target);
   }
   return [...targets.values()];
@@ -133,6 +169,7 @@ function withTargetDetected(
             detected: true,
             targets: [target.target],
             installTargets: [target.target],
+            ...(target.mechanism ? { detail: target.mechanism } : {}),
           }
         : store,
     ),
@@ -174,9 +211,10 @@ export async function inspectInstalled(
   adapter: StoreAdapter,
   certPem: string,
   target: string,
+  mechanism?: string,
 ): Promise<'present' | 'absent' | 'inconclusive'> {
   try {
-    return await adapter.inspectInstalled(certPem, target);
+    return await adapter.inspectInstalled(certPem, target, mechanism);
   } catch {
     return 'inconclusive';
   }
@@ -269,6 +307,20 @@ export function planInstall(
 ): DryRunCommand[] {
   const path = certificateExists ? caCertPath : '<ca-cert.pem>';
   return targets.flatMap((target) => {
+    if (
+      target.store === 'linux-system' &&
+      isLinuxTrustMechanism(target.mechanism) &&
+      target.target !== 'default'
+    ) {
+      const command = linuxInstallArgv(
+        caCertPath,
+        target.target,
+        target.mechanism,
+      )
+        .map((argv) => `sudo ${argv.map(shQuote).join(' ')}`)
+        .join(' && ');
+      return [{ ...target, command, manual: command }];
+    }
     if (target.target !== 'default') return [];
     if (target.store === 'windows-root') {
       const argv = windowsInstallArgv(path);
@@ -292,6 +344,16 @@ export function planUninstall(
   const path = certificateExists ? caCertPath : '<ca-cert.pem>';
   const fingerprint = sha256 ?? '<sha256>';
   return targets.flatMap((target) => {
+    if (
+      target.store === 'linux-system' &&
+      isLinuxTrustMechanism(target.mechanism) &&
+      target.target !== 'default'
+    ) {
+      const command = linuxUninstallArgv(target.target, target.mechanism)
+        .map((argv) => `sudo ${argv.map(shQuote).join(' ')}`)
+        .join(' && ');
+      return [{ ...target, command, manual: command }];
+    }
     if (target.target !== 'default') return [];
     if (target.store === 'windows-root') {
       let sha1 = '<sha1-thumbprint>';
@@ -392,7 +454,8 @@ export function resolveDependencies(
     detect: dependencies.detect ?? detect,
     adapterFactory:
       dependencies.adapterFactory ??
-      ((caCertPath) => defaultAdapterFactory(caCertPath)),
+      ((caCertPath, elevateCommand) =>
+        defaultAdapterFactory(caCertPath, elevateCommand)),
     ...dependencies,
   };
   if (resolved.fsGuard || process.platform !== 'win32') return resolved;
@@ -401,7 +464,16 @@ export function resolveDependencies(
 
 export function uniqueTargets(targets: TrustTarget[]): TrustTarget[] {
   const unique = new Map<string, TrustTarget>();
-  for (const target of targets)
-    unique.set(`${target.store}\0${target.target}`, target);
+  for (const target of targets) {
+    const key = `${target.store}\0${target.target}`;
+    unique.set(
+      key,
+      trustTarget(
+        target.store,
+        target.target,
+        target.mechanism ?? unique.get(key)?.mechanism,
+      ),
+    );
+  }
   return [...unique.values()];
 }

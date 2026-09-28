@@ -9,6 +9,7 @@ import {
 } from './core/certificate.js';
 import { detect } from './platforms/detect.js';
 import { createWindowsFsGuard } from './platforms/fsguard.js';
+import { createLinuxAdapter } from './platforms/linux.js';
 import { createMacosAdapter } from './platforms/macos.js';
 import { run } from './platforms/run.js';
 import { createWindowsAdapter } from './platforms/windows.js';
@@ -55,13 +56,24 @@ export async function status(
         ? await createWindowsAdapter({
             run,
           }).checkTrust(material.certPem, environment)
-        : [];
+        : material &&
+            environment.os === 'linux' &&
+            environment.stores.some(
+              (store) => store.store === 'linux-system' && store.detected,
+            )
+          ? await createLinuxAdapter({
+              caCertPath: join(dir, 'ca-cert.pem'),
+              run,
+            }).checkTrust(material.certPem, environment)
+          : [];
   const activeAdapterStore =
     environment.os === 'macos'
       ? 'macos-keychain'
       : environment.os === 'windows'
         ? 'windows-root'
-        : undefined;
+        : environment.os === 'linux'
+          ? 'linux-system'
+          : undefined;
 
   const stores: StatusReport['stores'][number][] = [];
   for (const detectedStore of environment.stores) {

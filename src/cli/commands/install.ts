@@ -28,6 +28,7 @@ import {
   type TrustTarget,
   targetTrustState,
   trustCaPath,
+  trustTarget,
   uniqueTargets,
   unsupportedTargetResult,
   unsupportedTargetsMessage,
@@ -83,7 +84,8 @@ function removeTargetRecords(state: StateFile, target: TrustTarget): boolean {
 function promoteTarget(state: StateFile, target: TrustTarget): void {
   const pending = pendingRecord(state, target);
   const previous = trustRecord(state, target);
-  const mechanism = pending?.mechanism ?? previous?.mechanism;
+  const mechanism =
+    target.mechanism ?? pending?.mechanism ?? previous?.mechanism;
   state.trustWrites = state.trustWrites.filter(
     (write) => !sameTarget(write, target),
   );
@@ -103,13 +105,14 @@ function promoteTarget(state: StateFile, target: TrustTarget): void {
 
 function makePending(state: StateFile, target: TrustTarget): void {
   const previous = pendingRecord(state, target);
+  const mechanism = target.mechanism ?? previous?.mechanism;
   state.pendingWrites = state.pendingWrites.filter(
     (write) => !sameTarget(write, target),
   );
   state.pendingWrites.push({
     store: target.store,
     target: target.target,
-    ...(previous?.mechanism ? { mechanism: previous.mechanism } : {}),
+    ...(mechanism ? { mechanism } : {}),
     sha256: state.ca.sha256,
     timestamp: new Date().toISOString(),
   });
@@ -125,7 +128,7 @@ async function runInstall(
   warnWsl(environment);
   const dir = deps.resolveCaDir();
   const certPath = trustCaPath(dir);
-  const currentTargets = adapterTargets(environment, 'install');
+  const currentTargets = adapterTargets(environment, 'install', certPath);
   const adapterMap = adaptersById(deps.adapterFactory(certPath, elevate));
   if (dryRun) {
     const state = readState(dir, fileOptions(deps));
@@ -136,10 +139,13 @@ async function runInstall(
         existsSync(certPath),
       ),
       json,
-      (state?.pendingWrites ?? []).map((write) => ({
-        store: write.store as TrustTarget['store'],
-        target: write.target,
-      })),
+      (state?.pendingWrites ?? []).map((write) =>
+        trustTarget(
+          write.store as TrustTarget['store'],
+          write.target,
+          write.mechanism,
+        ),
+      ),
       currentTargets.filter((target) => !adapterMap.has(target.store)),
     );
     process.exitCode = 0;
@@ -154,10 +160,13 @@ async function runInstall(
     dir,
     async () => {
       const existing = readState(dir, lockOptions);
-      const pendingTargets = (existing?.pendingWrites ?? []).map((write) => ({
-        store: write.store as TrustTarget['store'],
-        target: write.target,
-      }));
+      const pendingTargets = (existing?.pendingWrites ?? []).map((write) =>
+        trustTarget(
+          write.store as TrustTarget['store'],
+          write.target,
+          write.mechanism,
+        ),
+      );
       const targets = uniqueTargets([...currentTargets, ...pendingTargets]);
       if (
         targets.length > 0 &&
@@ -190,6 +199,7 @@ async function runInstall(
           adapter,
           material.certPem,
           target.target,
+          target.mechanism,
         );
 
         if (
@@ -271,12 +281,17 @@ async function runInstall(
 
         let receipt: Awaited<ReturnType<StoreAdapter['install']>>;
         try {
-          receipt = await adapter.install(certPath, target.target);
+          receipt = await adapter.install(
+            certPath,
+            target.target,
+            target.mechanism,
+          );
         } catch (error) {
           const afterFailure = await inspectInstalled(
             adapter,
             material.certPem,
             target.target,
+            target.mechanism,
           );
           if (afterFailure === 'absent' && removeTargetRecords(state, target))
             writeStateAtomic(dir, state, lockOptions);

@@ -17,6 +17,8 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createInstallCommand } from '../../src/cli/commands/install.js';
 import {
+  adapterTargets,
+  planInstall,
   planUninstall,
   type TrustCommandDependencies,
 } from '../../src/cli/commands/trust.js';
@@ -25,6 +27,10 @@ import { shQuote } from '../../src/cli/elevate.js';
 import { certificateFor } from '../../src/core/certificate.js';
 import { CertkitError } from '../../src/core/errors.js';
 import type { Environment } from '../../src/platforms/detect.js';
+import {
+  linuxAnchorTarget,
+  linuxAnchorTempTarget,
+} from '../../src/platforms/linux.js';
 import type { StoreAdapter } from '../../src/platforms/store.js';
 
 const roots: string[] = [];
@@ -78,6 +84,19 @@ function windowsEnvironment(): Environment {
   };
 }
 
+function linuxEnvironment(mechanism: string): Environment {
+  return {
+    os: 'linux',
+    wsl: false,
+    stores: [
+      { store: 'macos-keychain', detected: false },
+      { store: 'windows-root', detected: false },
+      { store: 'linux-system', detected: true, detail: mechanism },
+      { store: 'nss', detected: false, targets: [], installTargets: [] },
+    ],
+  };
+}
+
 function twoDatabaseEnvironment(): Environment {
   return {
     os: 'linux',
@@ -102,7 +121,9 @@ function fakeAdapter(
 ): StoreAdapter & {
   installed: Set<string>;
   installCalls: string[];
+  installMechanisms: Array<string | undefined>;
   uninstallCalls: string[];
+  uninstallMechanisms: Array<string | undefined>;
   failInstall: Set<string>;
   failUninstall: Set<string>;
   inconclusiveInstall: Set<string>;
@@ -113,7 +134,9 @@ function fakeAdapter(
     id,
     installed,
     installCalls: [] as string[],
+    installMechanisms: [] as Array<string | undefined>,
     uninstallCalls: [] as string[],
+    uninstallMechanisms: [] as Array<string | undefined>,
     failInstall: new Set<string>(),
     failUninstall: new Set<string>(),
     inconclusiveInstall: new Set<string>(),
@@ -138,8 +161,9 @@ function fakeAdapter(
       if (this.inconclusiveInspect.has(target)) return 'inconclusive' as const;
       return installed.has(target) ? ('present' as const) : ('absent' as const);
     },
-    async install(_path, target) {
+    async install(_path, target, mechanism) {
       this.installCalls.push(target);
+      this.installMechanisms.push(mechanism);
       if (this.failInstall.delete(target))
         throw new CertkitError(
           'STORE_WRITE_FAILED',
@@ -153,8 +177,9 @@ function fakeAdapter(
       installed.add(target);
       return { state: 'verified' as const };
     },
-    async uninstall(_pem, target) {
+    async uninstall(_pem, target, mechanism) {
       this.uninstallCalls.push(target);
+      this.uninstallMechanisms.push(mechanism);
       if (this.failUninstall.delete(target))
         throw new CertkitError(
           'STORE_WRITE_FAILED',
@@ -207,6 +232,7 @@ type TestState = {
   trustWrites: Array<{
     store: string;
     target: string;
+    mechanism?: string;
     serial: string;
     sha256: string;
     timestamp: string;
@@ -214,6 +240,7 @@ type TestState = {
   pendingWrites: Array<{
     store: string;
     target: string;
+    mechanism?: string;
     sha256: string;
     timestamp: string;
   }>;
@@ -288,6 +315,122 @@ describe('install command', () => {
       { store: 'macos-keychain', target: 'default' },
     ]);
     expect(state(path).pendingWrites).toEqual([]);
+  });
+
+  it('uninstalls a Linux anchor using its recorded mechanism after detection changes', async () => {
+    const path = join(fixture(), 'ca');
+    const certPath = join(path, 'ca-cert.pem');
+    const adapter = fakeAdapter('linux-system');
+    const firstInstall = output();
+    let failRebuild = true;
+    adapter.install = async (_path, target, mechanism) => {
+      adapter.installCalls.push(target);
+      adapter.installMechanisms.push(mechanism);
+      adapter.installed.add(target);
+      if (failRebuild) {
+        failRebuild = false;
+        throw new CertkitError(
+          'STORE_WRITE_FAILED',
+          'simulated update-ca-certificates rebuild failure',
+        );
+      }
+      return { state: 'verified' };
+    };
+    const originalTarget = linuxAnchorTarget(
+      certPath,
+      'update-ca-certificates',
+    );
+    const newlyDetectedTarget = linuxAnchorTarget(certPath, 'update-ca-trust');
+
+    await invoke(
+      createInstallCommand(
+        dependencies(path, linuxEnvironment('update-ca-certificates'), [
+          adapter,
+        ]),
+      ),
+      { json: true },
+    );
+
+    expect(process.exitCode).toBe(1);
+    expect(state(path).pendingWrites).toMatchObject([
+      {
+        store: 'linux-system',
+        target: originalTarget,
+        mechanism: 'update-ca-certificates',
+      },
+    ]);
+    expect(state(path).trustWrites).toEqual([]);
+    const failedResult = JSON.parse(firstInstall.stdout[0] ?? '') as {
+      results: Array<Record<string, unknown>>;
+    };
+    expect(failedResult.results[0]).not.toHaveProperty('mechanism');
+
+    process.exitCode = 0;
+    await invoke(
+      createInstallCommand(
+        dependencies(path, linuxEnvironment('update-ca-certificates'), [
+          adapter,
+        ]),
+      ),
+      { json: true },
+    );
+
+    expect(state(path).trustWrites).toMatchObject([
+      {
+        store: 'linux-system',
+        target: originalTarget,
+        mechanism: 'update-ca-certificates',
+      },
+    ]);
+    expect(adapter.installMechanisms).toEqual([
+      'update-ca-certificates',
+      'update-ca-certificates',
+    ]);
+
+    process.exitCode = 0;
+    await invoke(
+      createUninstallCommand(
+        dependencies(path, linuxEnvironment('update-ca-trust'), [adapter]),
+      ),
+      { json: true },
+    );
+
+    expect(adapter.uninstallCalls).toEqual([
+      newlyDetectedTarget,
+      originalTarget,
+    ]);
+    expect(adapter.uninstallMechanisms).toEqual([
+      'update-ca-trust',
+      'update-ca-certificates',
+    ]);
+    expect(existsSync(path)).toBe(false);
+  });
+
+  it('plans Linux dry-run commands for the exact anchor target', () => {
+    const certPath = '/tmp/certkit/ca-cert.pem';
+    const environment = linuxEnvironment('update-ca-certificates');
+    const targets = adapterTargets(environment, 'install', certPath);
+    const target = linuxAnchorTarget(certPath, 'update-ca-certificates');
+
+    expect(targets).toEqual([
+      {
+        store: 'linux-system',
+        target,
+      },
+    ]);
+    expect(targets[0]?.mechanism).toBe('update-ca-certificates');
+    expect(planInstall(targets, certPath, true)).toEqual([
+      {
+        ...targets[0],
+        command: `sudo 'install' '-m' '0644' '${certPath}' '${linuxAnchorTempTarget(target)}' && sudo 'mv' '-f' '--' '${linuxAnchorTempTarget(target)}' '${target}' && sudo 'update-ca-certificates'`,
+        manual: `sudo 'install' '-m' '0644' '${certPath}' '${linuxAnchorTempTarget(target)}' && sudo 'mv' '-f' '--' '${linuxAnchorTempTarget(target)}' '${target}' && sudo 'update-ca-certificates'`,
+      },
+    ]);
+    expect(
+      planUninstall(targets, certPath, true).map(({ command }) => command),
+    ).toEqual([
+      `sudo 'rm' '-f' '--' '${target}' && sudo 'rm' '-f' '--' '${linuxAnchorTempTarget(target)}' && sudo 'update-ca-certificates'`,
+    ]);
   });
 
   it('retries a present but untrusted target after a failed partial install', async () => {

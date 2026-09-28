@@ -36,6 +36,7 @@ import {
   targetTrustState,
   toErrorResult,
   trustCaPath,
+  trustTarget,
   uniqueTargets,
   unsupportedTargetResult,
   unsupportedTargetsMessage,
@@ -92,6 +93,7 @@ function recordTargetForRemoval(
   state.trustWrites.push({
     store: target.store,
     target: target.target,
+    ...(target.mechanism ? { mechanism: target.mechanism } : {}),
     serial: state.ca.serial,
     sha256: state.ca.sha256,
     timestamp: new Date().toISOString(),
@@ -293,7 +295,7 @@ async function runUninstall(
   warnWsl(environment);
   const dir = deps.resolveCaDir();
   const certPath = trustCaPath(dir);
-  const currentTargets = adapterTargets(environment, 'uninstall');
+  const currentTargets = adapterTargets(environment, 'uninstall', certPath);
   const adapterMap = adaptersById(deps.adapterFactory(certPath, elevate));
   if (dryRun) {
     const state = readState(dir, fileOptions(deps));
@@ -309,10 +311,13 @@ async function runUninstall(
         state?.ca.sha256,
       ),
       json,
-      (state?.pendingWrites ?? []).map((write) => ({
-        store: write.store as TrustTarget['store'],
-        target: write.target,
-      })),
+      (state?.pendingWrites ?? []).map((write) =>
+        trustTarget(
+          write.store as TrustTarget['store'],
+          write.target,
+          write.mechanism,
+        ),
+      ),
       targets.filter((target) => !adapterMap.has(target.store)),
     );
     process.exitCode = 0;
@@ -403,11 +408,16 @@ async function runUninstall(
             continue;
           }
           try {
-            await adapter.uninstall(material.certPem, target.target);
+            await adapter.uninstall(
+              material.certPem,
+              target.target,
+              target.mechanism,
+            );
             const present = await inspectInstalled(
               adapter,
               material.certPem,
               target.target,
+              target.mechanism,
             );
             if (present !== 'absent')
               throw new CertkitError(
@@ -428,6 +438,7 @@ async function runUninstall(
               adapter,
               material.certPem,
               target.target,
+              target.mechanism,
             );
             const trust =
               installed === 'present'
