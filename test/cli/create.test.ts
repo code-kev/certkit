@@ -220,6 +220,64 @@ describe('create command', () => {
     expect(readdirSync(caDir)).toEqual([]);
   });
 
+  it('preserves a pre-existing certificate temp-file collision', () => {
+    const root = fixture();
+    const outputDir = join(root, 'out');
+    const caDir = join(root, 'ca');
+    mkdirSync(outputDir);
+    mkdirSync(caDir, { mode: 0o700 });
+    const collision = join(outputDir, '.certkit-cert-collision.tmp');
+    writeFileSync(collision, 'pre-existing certificate temp');
+
+    expect(() =>
+      writeCertificateFiles(
+        {
+          cert: join(outputDir, 'localhost.pem'),
+          key: join(outputDir, 'localhost-key.pem'),
+        },
+        { cert: 'certificate', key: 'private key' },
+        {
+          force: false,
+          caDir,
+          randomUUID: () => 'cert-collision',
+        },
+      ),
+    ).toThrow();
+
+    expect(readFileSync(collision, 'utf8')).toBe(
+      'pre-existing certificate temp',
+    );
+  });
+
+  it('preserves a pre-existing private-key temp-file collision', () => {
+    const root = fixture();
+    const outputDir = join(root, 'out');
+    const caDir = join(root, 'ca');
+    mkdirSync(outputDir);
+    mkdirSync(caDir, { mode: 0o700 });
+    const collision = join(outputDir, '.leaf-key-key-collision.tmp');
+    writeFileSync(collision, 'pre-existing key temp');
+    const ids = ['cert-temp', 'key-collision'];
+
+    expect(() =>
+      writeCertificateFiles(
+        {
+          cert: join(outputDir, 'localhost.pem'),
+          key: join(outputDir, 'localhost-key.pem'),
+        },
+        { cert: 'certificate', key: 'private key' },
+        {
+          force: false,
+          caDir,
+          randomUUID: () => ids.shift() ?? 'unexpected',
+        },
+      ),
+    ).toThrow();
+
+    expect(readFileSync(collision, 'utf8')).toBe('pre-existing key temp');
+    expect(readdirSync(outputDir)).toEqual(['.leaf-key-key-collision.tmp']);
+  });
+
   it.each([false, true])(
     'preflights Windows key placement with an empty key before bytes are staged (force=%s)',
     (force) => {
@@ -268,6 +326,18 @@ describe('create command', () => {
             path.startsWith(outputDir) && path !== paths.key && bytes === 0,
         ),
       ).toBe(true);
+      const placementProbeIndex = calls.findLastIndex(
+        ({ path, bytes }) =>
+          path.startsWith(outputDir) && path !== paths.key && bytes === 0,
+      );
+      const emptyKeyStageIndices = calls.flatMap(({ path, bytes }, index) =>
+        path.startsWith(caDir) && path.includes('.leaf-key-') && bytes === 0
+          ? [index]
+          : [],
+      );
+      expect(placementProbeIndex).toBeGreaterThanOrEqual(0);
+      expect(emptyKeyStageIndices).toHaveLength(2);
+      expect(placementProbeIndex).toBeLessThan(emptyKeyStageIndices[1] ?? -1);
       expect(calls.some(({ path }) => path === paths.key)).toBe(true);
       expect(readFileSync(paths.key, 'utf8')).toBe('private key');
       expect(readdirSync(caDir)).toEqual([]);

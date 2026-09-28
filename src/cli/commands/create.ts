@@ -58,6 +58,7 @@ interface WriteOptions {
   fsGuard?: FsGuard;
   platform?: NodeJS.Platform;
   rename?: typeof renameSync;
+  randomUUID?: () => string;
 }
 
 const args: Args = {
@@ -193,6 +194,7 @@ function preflightWindowsKeyPlacement(
   force: boolean,
   fsGuard: FsGuard | undefined,
   rename: typeof renameSync,
+  randomUUID: () => string,
 ): void {
   if (!fsGuard)
     throw new CertkitError(
@@ -251,17 +253,27 @@ function preflightWindowsKeyPlacement(
 
 function writeCertTemp(path: string, contents: string): void {
   let fd: number | undefined;
+  let created = false;
   try {
     fd = openSync(path, 'wx', 0o644);
+    created = true;
     writeFileSync(fd, contents, 'utf8');
     closeSync(fd);
     fd = undefined;
   } catch (cause) {
-    if (fd !== undefined) closeSync(fd);
-    try {
-      unlinkSync(path);
-    } catch {
-      // Keep the original write error.
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        // Keep the original write error.
+      }
+    }
+    if (created) {
+      try {
+        unlinkSync(path);
+      } catch {
+        // Keep the original write error.
+      }
     }
     throw new CertkitError(
       'CA_UNREADABLE',
@@ -279,8 +291,10 @@ function writeOutputKeyTemp(
   fsGuard?: FsGuard,
 ): void {
   let fd: number | undefined;
+  let created = false;
   try {
     fd = openSync(path, 'wx', 0o600);
+    created = true;
     const stat = fstatSync(fd);
     if (!stat.isFile() || (stat.mode & 0o777) !== 0o600)
       throw new CertkitError(
@@ -298,11 +312,19 @@ function writeOutputKeyTemp(
     closeSync(fd);
     fd = undefined;
   } catch (cause) {
-    if (fd !== undefined) closeSync(fd);
-    try {
-      unlinkSync(path);
-    } catch {
-      // Keep the original write error.
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        // Keep the original write error.
+      }
+    }
+    if (created) {
+      try {
+        unlinkSync(path);
+      } catch {
+        // Keep the original write error.
+      }
     }
     if (cause instanceof CertkitError) throw cause;
     throw new CertkitError(
@@ -349,6 +371,7 @@ export function writeCertificateFiles(
 ): void {
   const platform = options.platform ?? process.platform;
   const rename = options.rename ?? renameSync;
+  const createId = options.randomUUID ?? randomUUID;
   const outputDir = dirname(paths.cert);
   checkOutputPaths(paths, options.force);
   if (platform === 'win32')
@@ -358,9 +381,10 @@ export function writeCertificateFiles(
       options.force,
       options.fsGuard,
       rename,
+      createId,
     );
 
-  const certTemp = join(outputDir, `.certkit-${randomUUID()}.tmp`);
+  const certTemp = join(outputDir, `.certkit-${createId()}.tmp`);
   let keyTemp: string | undefined;
   let certTempExists = false;
   let keyReplaced = false;
@@ -371,7 +395,7 @@ export function writeCertificateFiles(
     writeCertTemp(certTemp, bundle.cert);
     certTempExists = true;
     if (platform === 'win32') {
-      const filename = `.leaf-key-${randomUUID()}.tmp`;
+      const filename = `.leaf-key-${createId()}.tmp`;
       keyTemp = writePrivateKey(
         options.caDir,
         filename,
@@ -379,8 +403,9 @@ export function writeCertificateFiles(
         options.fsGuard ? { fsGuard: options.fsGuard } : {},
       );
     } else {
-      keyTemp = join(outputDir, `.leaf-key-${randomUUID()}.tmp`);
-      writeOutputKeyTemp(keyTemp, bundle.key, options.fsGuard);
+      const temp = join(outputDir, `.leaf-key-${createId()}.tmp`);
+      writeOutputKeyTemp(temp, bundle.key, options.fsGuard);
+      keyTemp = temp;
     }
     publish(keyTemp, paths.key, options.force, rename, () => {
       keyReplaced = true;
