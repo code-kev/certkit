@@ -64,6 +64,7 @@
     "@types/node": "26.6.2",
     "@vitest/coverage-v8": "5.0.1",
     "dependency-cruiser": "18.4.0",
+    "fast-check": "4.10.2",
     "knip": "6.37.0",
     "lefthook": "2.1.14",
     "publint": "0.3.24",

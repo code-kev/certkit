@@ -55,6 +55,15 @@ describe('validateNames', () => {
       expect(validateNames([n])[0]?.kind).toBe('ip');
     },
   );
+  it.each([
+    ['::0:0:0', '::'],
+    ['0:0:0:0:0:0:0:0', '::'],
+    ['2001:0DB8::0001', '2001:db8::1'],
+    ['::ffff:127.0.0.1', '::ffff:7f00:1'],
+    ['::0:0:0%eth0', '::'],
+  ])('canonicalizes IPv6 literal %s to %s', (input, expected) => {
+    expect(validateNames([input])[0]).toEqual({ kind: 'ip', ip: expected });
+  });
 });
 
 describe('DNS length limits', () => {
