@@ -192,7 +192,29 @@ async function runInstall(
           target.target,
         );
 
-        if (installed === 'present') {
+        if (
+          installed === 'present' &&
+          pendingRecord(state, target) &&
+          !active
+        ) {
+          const detail =
+            'The recorded target is no longer detected; certificate presence does not verify its pending install receipt.';
+          results.push({
+            ...target,
+            state: 'unknown',
+            detail,
+            error: { code: 'STORE_WRITE_FAILED', message: detail },
+          });
+          failed = true;
+          continue;
+        }
+
+        // Fingerprint presence alone cannot distinguish a receipt from a partial write.
+        if (
+          installed === 'present' &&
+          !pendingRecord(state, target) &&
+          trustRecord(state, target)
+        ) {
           promoteTarget(state, target);
           writeStateAtomic(dir, state, lockOptions);
           await emitEvent(deps, { type: 'install:promoted', ...target });
@@ -204,15 +226,14 @@ async function runInstall(
                 'Reconciled the recorded target; it is no longer detected.',
             });
           } else {
-            results.push({
-              ...target,
-              ...(await targetTrustState(
-                adapter,
-                material.certPem,
-                environment,
-                target,
-              )),
-            });
+            const observed = await targetTrustState(
+              adapter,
+              material.certPem,
+              environment,
+              target,
+            );
+            results.push({ ...target, ...observed });
+            if (observed.state === 'untrusted') failed = true;
           }
           continue;
         }
@@ -228,7 +249,10 @@ async function runInstall(
             });
             continue;
           }
-        } else if (!active || hasRecoveryRecord) {
+        } else if (
+          installed === 'inconclusive' &&
+          (!active || hasRecoveryRecord)
+        ) {
           const detail =
             'The recorded target could not be inspected; its recovery record remains pending.';
           results.push({

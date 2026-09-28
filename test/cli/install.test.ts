@@ -267,6 +267,59 @@ describe('install command', () => {
     expect(state(path).pendingWrites).toEqual([]);
   });
 
+  it('retries a present but untrusted target after a failed partial install', async () => {
+    const path = join(fixture(), 'ca');
+    const adapter = fakeAdapter('macos-keychain');
+    let installed = false;
+    let trusted = false;
+    adapter.inspectInstalled = async () => (installed ? 'present' : 'absent');
+    adapter.checkTrust = async () => [
+      { target: 'default', state: trusted ? 'trusted' : 'untrusted' },
+    ];
+    adapter.install = async (_path, target) => {
+      adapter.installCalls.push(target);
+      installed = true;
+      if (adapter.installCalls.length === 1)
+        throw new CertkitError(
+          'STORE_WRITE_FAILED',
+          'simulated elevated command failure after certificate write',
+        );
+      trusted = true;
+      return { state: 'verified' };
+    };
+    const result = output();
+
+    await invoke(
+      createInstallCommand(dependencies(path, macEnvironment(), [adapter])),
+      { json: true },
+    );
+
+    expect(process.exitCode).toBe(1);
+    expect(adapter.installCalls).toEqual(['default']);
+    expect(await adapter.inspectInstalled('unused', 'default')).toBe('present');
+    await expect(
+      adapter.checkTrust('unused', macEnvironment()),
+    ).resolves.toEqual([{ target: 'default', state: 'untrusted' }]);
+    expect(state(path).pendingWrites).toHaveLength(1);
+    expect(state(path).trustWrites).toEqual([]);
+
+    process.exitCode = 0;
+    await invoke(
+      createInstallCommand(dependencies(path, macEnvironment(), [adapter])),
+      { json: true },
+    );
+
+    expect(process.exitCode).toBe(0);
+    expect(adapter.installCalls).toEqual(['default', 'default']);
+    expect(state(path).pendingWrites).toEqual([]);
+    expect(state(path).trustWrites).toHaveLength(1);
+    expect(JSON.parse(result.stdout[1] ?? '')).toMatchObject({
+      results: [
+        { store: 'macos-keychain', target: 'default', state: 'trusted' },
+      ],
+    });
+  });
+
   it('records a verified write even when effective trust remains unknown', async () => {
     const path = join(fixture(), 'ca');
     const adapter = fakeAdapter('macos-keychain');
@@ -407,7 +460,7 @@ describe('install command', () => {
     expect(state(path).trustWrites).toHaveLength(1);
   });
 
-  it('reconciles a store write after a crash before promotion without writing twice', async () => {
+  it('retries a present target after a crash before promotion for a fresh receipt', async () => {
     const path = join(fixture(), 'ca');
     const adapter = fakeAdapter('macos-keychain');
     let crash = true;
@@ -434,12 +487,12 @@ describe('install command', () => {
       },
     );
 
-    expect(adapter.installCalls).toEqual(['default']);
+    expect(adapter.installCalls).toEqual(['default', 'default']);
     expect(state(path).pendingWrites).toEqual([]);
     expect(state(path).trustWrites).toHaveLength(1);
   });
 
-  it('keeps an uninspectable pending write without issuing a duplicate install', async () => {
+  it('keeps an uninspectable pending write and retries when the target is inspectable', async () => {
     const path = join(fixture(), 'ca');
     const adapter = fakeAdapter('macos-keychain');
     let crash = true;
@@ -486,12 +539,12 @@ describe('install command', () => {
       { json: true },
     );
 
-    expect(adapter.installCalls).toEqual(['default']);
+    expect(adapter.installCalls).toEqual(['default', 'default']);
     expect(state(path).pendingWrites).toEqual([]);
     expect(state(path).trustWrites).toHaveLength(1);
   });
 
-  it('reconciles a pending target even after detection no longer reports it', async () => {
+  it('keeps a pending target unresolved after detection no longer reports it', async () => {
     const path = join(fixture(), 'ca');
     const adapter = fakeAdapter('nss');
     let crash = true;
@@ -529,18 +582,18 @@ describe('install command', () => {
       },
     );
 
-    expect(process.exitCode).toBe(0);
+    expect(process.exitCode).toBe(1);
     expect(adapter.installCalls).toEqual(['/tmp/profile-a']);
-    expect(state(path).pendingWrites).toEqual([]);
-    expect(state(path).trustWrites.map((write) => write.target)).toEqual([
-      '/tmp/profile-a',
-    ]);
+    expect(state(path).pendingWrites).toHaveLength(1);
+    expect(state(path).trustWrites).toEqual([]);
     expect(JSON.parse(result.stdout[0] ?? '')).toMatchObject({
       results: [
         {
           store: 'nss',
           target: '/tmp/profile-a',
-          state: 'not-detected',
+          state: 'unknown',
+          error: { code: 'STORE_WRITE_FAILED' },
+          detail: expect.stringContaining('no longer detected'),
         },
       ],
     });
