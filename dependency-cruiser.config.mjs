@@ -13,5 +13,9 @@ export default {
       to: { path: '^src/(cli|integrations)/' },
     },
   ],
-  options: { doNotFollow: { path: 'node_modules' } },
+  options: {
+    doNotFollow: { path: 'node_modules' },
+    tsPreCompilationDeps: true,
+    tsConfig: { fileName: 'tsconfig.json' },
+  },
 };

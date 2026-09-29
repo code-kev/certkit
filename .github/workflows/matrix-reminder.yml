@@ -1,0 +1,35 @@
+name: Trust matrix reminder
+
+on:
+  schedule:
+    - cron: '0 9 1 * *'
+
+permissions: {}
+
+concurrency:
+  group: trust-matrix-reminder
+  cancel-in-progress: false
+
+jobs:
+  reminder:
+    name: trust-matrix-reminder
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write # Open the monthly verification reminder.
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+      - name: Open monthly trust matrix issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          title="Trust matrix re-verify — $(date -u +%Y-%m)"
+          open_issues=$(gh issue list --state open --search "$title in:title" --json title --jq 'length')
+          if [[ "$open_issues" == 0 ]]; then
+            gh issue create --title "$title" --body 'Review the supported platform and browser trust matrix. Re-run the trust checks, record the observed results and environment, and update the matrix documentation.'
+          fi

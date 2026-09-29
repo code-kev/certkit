@@ -34,7 +34,7 @@
     "test": "vitest run",
     "coverage": "vitest run --coverage",
     "commitlint": "commitlint",
-    "lint": "biome check . && depcruise src --config dependency-cruiser.config.mjs && knip && pnpm deps:check",
+    "lint": "biome check . && node scripts/check-boundaries.mjs && knip && pnpm deps:check",
     "typecheck": "tsc --noEmit",
     "deps:check": "node scripts/check-deps.mjs"
   },
@@ -68,7 +68,7 @@
     "lefthook": "2.1.14",
     "publint": "0.3.24",
     "tsdown": "0.23.0",
-    "typescript": "7.0.2",
+    "typescript": "6.0.3",
     "vite": "8.3.0",
     "vite7": "npm:vite@7.3.6",
     "vitest": "5.0.1"

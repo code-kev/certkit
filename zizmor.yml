@@ -1,0 +1,2 @@
+# Keep zizmor's default audits enabled; no findings are suppressed.
+rules: {}

@@ -1,0 +1,234 @@
+name: CI
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions: {}
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+defaults:
+  run:
+    shell: bash
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: '24'
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: node test/check-deps.negative.mjs
+      - run: node test/check-boundaries.negative.mjs
+      - run: node test/check-source-policy.negative.mjs
+      - run: node test/check-changeset.negative.mjs
+  typecheck:
+    name: typecheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: '24'
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: '24'
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+  dev-pointer-grep:
+    name: dev-pointer-grep
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: node scripts/check-source-policy.mjs
+  changeset-check:
+    name: changeset-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: '24'
+      - run: pnpm install --frozen-lockfile
+      - name: Validate changesets
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [[ "$EVENT" == pull_request ]]; then
+            node scripts/check-changeset.mjs origin/main
+          else
+            pnpm changeset status
+          fi
+  test-matrix:
+    name: test-matrix (${{ matrix.os }}, Node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        node: ['22.15.0', '24']
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: ${{ matrix.node }}
+      - run: pnpm install --frozen-lockfile
+      - name: Linux oracles
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libnss3-tools openssl
+          command -v certutil
+          command -v openssl
+          openssl version | grep '^OpenSSL'
+          openssl verify -help 2>&1 | grep -- '-verify_ip'
+          openssl verify -help 2>&1 | grep -- '-verify_hostname'
+      - name: macOS oracles
+        if: runner.os == 'macOS'
+        run: |
+          brew install nss openssl@3
+          openssl_bin="$(brew --prefix openssl@3)/bin"
+          export PATH="$openssl_bin:$PATH"
+          echo "$(brew --prefix openssl@3)/bin" >> "$GITHUB_PATH"
+          command -v certutil
+          command -v security
+          echo "CERTKIT_CERTUTIL=$(brew --prefix nss)/bin/certutil" >> "$GITHUB_ENV"
+          openssl version | grep '^OpenSSL'
+          openssl verify -help 2>&1 | grep -- '-verify_ip'
+          openssl verify -help 2>&1 | grep -- '-verify_hostname'
+      - name: Install Windows NSS
+        if: runner.os == 'Windows'
+        id: msys2
+        uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
+        with:
+          msystem: UCRT64
+          update: true
+          cache: false
+          install: mingw-w64-ucrt-x86_64-nss
+      - name: Assert Windows oracles
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}
+        run: |
+          $certutil = Join-Path $env:MSYS2_LOCATION 'ucrt64\bin\certutil.exe'
+          if (-not (Test-Path $certutil)) { throw 'Mozilla NSS certutil missing' }
+          "CERTKIT_CERTUTIL=$certutil" >> $env:GITHUB_ENV
+          $db = Join-Path $env:RUNNER_TEMP 'nss-preflight'
+          New-Item -ItemType Directory -Path $db -Force | Out-Null
+          & $certutil -N -d "sql:$db" --empty-password
+          if ($LASTEXITCODE -ne 0) { throw 'NSS oracle initialization failed' }
+          Remove-Item $db -Recurse -Force
+          if (-not (Get-Command openssl -ErrorAction SilentlyContinue)) { throw 'OpenSSL missing' }
+          $version = & openssl version
+          if ($LASTEXITCODE -ne 0 -or $version -notmatch '^OpenSSL') { throw 'OpenSSL oracle unavailable' }
+          $help = & openssl verify -help 2>&1 | Out-String
+          if ($help -notmatch '-verify_ip' -or $help -notmatch '-verify_hostname') { throw 'OpenSSL named verification missing' }
+          $global:LASTEXITCODE = 0
+      - run: pnpm build
+      - run: pnpm coverage
+      - name: Native trust roundtrip
+        if: runner.os != 'Windows'
+        env:
+          CERTKIT_TRUST_E2E: '1'
+        run: pnpm vitest run test/e2e/trust.test.ts
+  test:
+    name: test
+    needs: [test-matrix]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+      - name: Require every dependency to succeed
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          node -e 'const jobs=Object.values(JSON.parse(process.env.NEEDS_JSON)); if (!jobs.length || jobs.some(job => job.result !== "success")) { console.error(process.env.NEEDS_JSON); process.exit(1); }'
+  required:
+    name: required
+    needs: [lint, typecheck, test-matrix, test, build, dev-pointer-grep, changeset-check]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+      - name: Require every dependency to succeed
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          node -e 'const jobs=Object.values(JSON.parse(process.env.NEEDS_JSON)); if (!jobs.length || jobs.some(job => job.result !== "success")) { console.error(process.env.NEEDS_JSON); process.exit(1); }'
