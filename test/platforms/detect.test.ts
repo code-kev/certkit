@@ -166,11 +166,16 @@ describe('environment detection', () => {
   it('includes relative and absolute Firefox profile DBs', async () => {
     const base = path.join(home, '.mozilla', 'firefox');
     const first = path.join(base, 'abc.default');
-    const second = '/tmp/custom-firefox-profile';
+    // resolve() anchors a drive-rooted path to the current drive on Windows.
+    const second = path.resolve(
+      process.platform === 'win32'
+        ? '\\custom-firefox-profile'
+        : '/tmp/custom-firefox-profile',
+    );
     const result = await detector({
       files: {
         [path.join(base, 'profiles.ini')]:
-          '[Profile0]\nIsRelative=1\nPath=abc.default\n[Profile1]\nIsRelative=0\nPath=/tmp/custom-firefox-profile\n',
+          `[Profile0]\nIsRelative=1\nPath=abc.default\n[Profile1]\nIsRelative=0\nPath=${second}\n`,
         [path.join(first, 'cert9.db')]: '',
         [path.join(second, 'cert9.db')]: '',
       },

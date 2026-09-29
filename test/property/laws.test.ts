@@ -7,7 +7,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createInstallCommand } from '../../src/cli/commands/install.js';
 import type { TrustCommandDependencies } from '../../src/cli/commands/trust.js';
 import { createUninstallCommand } from '../../src/cli/commands/uninstall.js';
-import { certificateFor } from '../../src/core/certificate.js';
+import type { FsGuard } from '../../src/core/cadir.js';
+import { certificateFor as certificateForCore } from '../../src/core/certificate.js';
 import { CertkitError } from '../../src/core/errors.js';
 import { type ValidName, validateNames } from '../../src/core/validate.js';
 import type { Environment } from '../../src/platforms/detect.js';
@@ -18,6 +19,25 @@ import {
 } from '../../src/platforms/nss.js';
 import type { RunResult } from '../../src/platforms/run.js';
 import type { StoreAdapter } from '../../src/platforms/store.js';
+
+// Laws cover cache/argv semantics, not ACLs: Windows gets a no-op guard
+// (real icacls is covered by the fsGuard/cadir tests).
+const stubGuard: FsGuard = {
+  protectDirectory() {},
+  assertProtectedDirectory() {},
+  assertProtectedFile() {},
+};
+
+function certificateFor(
+  names: string[],
+  options: { caDir: string; validityDays?: number },
+): ReturnType<typeof certificateForCore> {
+  return certificateForCore(
+    names,
+    options,
+    process.platform === 'win32' ? { fsGuard: stubGuard } : {},
+  );
+}
 
 /** Fixed seed makes every counterexample reproducible; fast-check prints it on failure. */
 const SEED = 20260929;
@@ -300,12 +320,17 @@ describe('law (ii): hostile paths stay discrete argv elements', () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
   });
 
-  const hostileCharacter = fc.constantFrom(
-    ...' abz09$&|;`\'"<>(){}[]*?!~#%=+@,.-_'.split(''),
-  );
+  // Windows filenames exclude <>:"/\|?* — keep the shell-hostile rest.
+  const hostileCharacters =
+    process.platform === 'win32'
+      ? " abz09$&;`'(){}[]!~#%=+@,.-_"
+      : ' abz09$&|;`\'"<>(){}[]*?!~#%=+@,.-_';
+  const hostileCharacter = fc.constantFrom(...hostileCharacters.split(''));
   const hostileSegment = fc
     .array(hostileCharacter, { minLength: 3, maxLength: 24 })
-    .map((chars) => chars.join(''));
+    .map((chars) => chars.join(''))
+    // Windows also rejects trailing dots/spaces in filenames.
+    .filter((s) => process.platform !== 'win32' || !/[. ]$/.test(s));
 
   it('NSS install and uninstall pass each whole path as its own element', async () => {
     await fc.assert(
@@ -321,6 +346,15 @@ describe('law (ii): hostile paths stay discrete argv elements', () => {
           resolveCaDir: () => dir,
           detect: async () => environment,
           adapterFactory: () => [adapter],
+          ...(process.platform === 'win32'
+            ? {
+                fsGuard: {
+                  protectDirectory() {},
+                  assertProtectedDirectory() {},
+                  assertProtectedFile() {},
+                },
+              }
+            : {}),
         };
         await invoke(createInstallCommand(dependencies), { json: true });
         process.exitCode = 0;
@@ -343,7 +377,11 @@ describe('law (ii): hostile paths stay discrete argv elements', () => {
   });
 
   it('Linux elevation receives whole paths, never flag-concatenated values', async () => {
-    const segment = 'ev il\'$(touch pwned)`;x"';
+    // " is not filename-legal on Windows; the rest of the segment stays hostile.
+    const segment =
+      process.platform === 'win32'
+        ? "ev il'$(touch pwned)`;x"
+        : 'ev il\'$(touch pwned)`;x"';
     const root = fixture();
     const dir = join(root, segment, 'ca');
     const caCertPath = join(dir, 'ca-cert.pem');
@@ -374,6 +412,15 @@ describe('law (ii): hostile paths stay discrete argv elements', () => {
           },
         }),
       ],
+      ...(process.platform === 'win32'
+        ? {
+            fsGuard: {
+              protectDirectory() {},
+              assertProtectedDirectory() {},
+              assertProtectedFile() {},
+            },
+          }
+        : {}),
     };
     await invoke(createInstallCommand(dependencies), { json: true });
 
@@ -452,6 +499,15 @@ function trustDependencies(
     resolveCaDir: () => dir,
     detect: async () => environment,
     adapterFactory: () => adapters,
+    ...(process.platform === 'win32'
+      ? {
+          fsGuard: {
+            protectDirectory() {},
+            assertProtectedDirectory() {},
+            assertProtectedFile() {},
+          },
+        }
+      : {}),
     ...overrides,
   };
 }

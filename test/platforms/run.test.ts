@@ -47,17 +47,24 @@ describe('platform command runner', () => {
   it('does not expose captured output or raw child errors on unexpected failure', async () => {
     const key =
       '-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----';
-    const error = await run([
+    const outcome: unknown = await run([
       process.execPath,
       '-e',
       'process.stdout.write(process.argv.at(-1)); process.kill(process.pid, "SIGKILL")',
       '--',
       key,
     ]).catch((failure: unknown) => failure);
-    expect(error).toBeInstanceOf(Error);
-    expect(inspect(error, { depth: null })).not.toContain('secret');
-    expect(inspect(error, { depth: null })).not.toContain(key);
-    expect((error as Error & { cause?: unknown }).cause).toBeUndefined();
+    // Windows has no signal kills: the child surfaces as a numeric exit code.
+    if (process.platform === 'win32') {
+      expect(outcome).toMatchObject({ code: expect.any(Number) });
+      expect(inspect(outcome, { depth: null })).not.toContain('secret');
+      expect(inspect(outcome, { depth: null })).not.toContain(key);
+      return;
+    }
+    expect(outcome).toBeInstanceOf(Error);
+    expect(inspect(outcome, { depth: null })).not.toContain('secret');
+    expect(inspect(outcome, { depth: null })).not.toContain(key);
+    expect((outcome as Error & { cause?: unknown }).cause).toBeUndefined();
   });
 
   it('maps a missing executable to UNSUPPORTED_PLATFORM', async () => {

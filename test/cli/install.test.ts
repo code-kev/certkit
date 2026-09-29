@@ -24,7 +24,8 @@ import {
 } from '../../src/cli/commands/trust.js';
 import { createUninstallCommand } from '../../src/cli/commands/uninstall.js';
 import { shQuote } from '../../src/cli/elevate.js';
-import { certificateFor } from '../../src/core/certificate.js';
+import type { FsGuard } from '../../src/core/cadir.js';
+import { certificateFor as certificateForCore } from '../../src/core/certificate.js';
 import { CertkitError } from '../../src/core/errors.js';
 import type { Environment } from '../../src/platforms/detect.js';
 import {
@@ -34,6 +35,25 @@ import {
 import type { StoreAdapter } from '../../src/platforms/store.js';
 
 const roots: string[] = [];
+
+// Trust orchestration, not ACLs: Windows gets a no-op guard (real icacls is
+// covered by the fsGuard/cadir tests).
+const stubGuard: FsGuard = {
+  protectDirectory() {},
+  assertProtectedDirectory() {},
+  assertProtectedFile() {},
+};
+
+function guardOptions(): { fsGuard?: FsGuard } {
+  return process.platform === 'win32' ? { fsGuard: stubGuard } : {};
+}
+
+function certificateFor(
+  names: string[],
+  options: { caDir: string },
+): ReturnType<typeof certificateForCore> {
+  return certificateForCore(names, options, guardOptions());
+}
 let previousHome: string | undefined;
 const loginKeychainPath = join(
   homedir(),
@@ -201,6 +221,7 @@ function dependencies(
     resolveCaDir: () => path,
     detect: async () => env,
     adapterFactory: () => adapters,
+    ...guardOptions(),
     ...overrides,
   };
 }

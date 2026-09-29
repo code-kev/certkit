@@ -64,6 +64,16 @@ function dependencies(
     resolveCaDir: () => path,
     detect: async () => env,
     adapterFactory: () => adapters,
+    // Foreign-CA preservation, not ACLs: Windows gets a no-op guard.
+    ...(process.platform === 'win32'
+      ? {
+          fsGuard: {
+            protectDirectory() {},
+            assertProtectedDirectory() {},
+            assertProtectedFile() {},
+          },
+        }
+      : {}),
   };
 }
 

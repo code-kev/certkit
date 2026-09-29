@@ -13,9 +13,29 @@ import {
   SubjectAlternativeNameExtension,
 } from '@peculiar/x509';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import type { FsGuard } from '../../src/core/cadir.js';
 import { mintCa, mintLeaf } from '../../src/core/certgen.js';
-import { certificateFor } from '../../src/core/certificate.js';
+import { certificateFor as certificateForCore } from '../../src/core/certificate.js';
 import { resolveNssCertutil } from '../../src/platforms/run.js';
+
+// Corpus covers certificate shape, not ACLs: Windows gets a no-op guard.
+const stubGuard: FsGuard = {
+  protectDirectory() {},
+  assertProtectedDirectory() {},
+  assertProtectedFile() {},
+};
+
+function certificateFor(
+  names: string[],
+  options: { caDir: string; validityDays?: number },
+): ReturnType<typeof certificateForCore> {
+  return certificateForCore(
+    names,
+    options,
+    process.platform === 'win32' ? { fsGuard: stubGuard } : {},
+  );
+}
+
 import {
   type CorpusCase,
   corpus,

@@ -77,7 +77,9 @@ describe('create command', () => {
     expect(readFileSync(output.files.key, 'utf8')).toContain(
       '-----BEGIN PRIVATE KEY-----',
     );
-    expect(statSync(output.files.key).mode & 0o777).toBe(0o600);
+    // Windows keys are protected by ACL, not mode bits.
+    if (process.platform !== 'win32')
+      expect(statSync(output.files.key).mode & 0o777).toBe(0o600);
   });
 
   it.each([
@@ -152,7 +154,8 @@ describe('create command', () => {
     expect(result.code).toBe(0);
     expect(readFileSync(cert, 'utf8')).toContain('-----BEGIN CERTIFICATE-----');
     expect(readFileSync(key, 'utf8')).toContain('-----BEGIN PRIVATE KEY-----');
-    expect(statSync(key).mode & 0o777).toBe(0o600);
+    if (process.platform !== 'win32')
+      expect(statSync(key).mode & 0o777).toBe(0o600);
   });
 
   it('rejects a symlinked output with --force without following or changing it', async () => {
@@ -200,6 +203,16 @@ describe('create command', () => {
         {
           force: true,
           caDir,
+          // Windows placement preflight requires a guard.
+          ...(process.platform === 'win32'
+            ? {
+                fsGuard: {
+                  protectDirectory() {},
+                  assertProtectedDirectory() {},
+                  assertProtectedFile() {},
+                },
+              }
+            : {}),
           rename(from, to) {
             if (to === paths.cert) {
               certificateRenameFailed = true;
