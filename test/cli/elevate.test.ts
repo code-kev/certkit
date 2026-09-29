@@ -1,12 +1,16 @@
+import { EventEmitter } from 'node:events';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('@expo/sudo-prompt', () => ({ exec: vi.fn() }));
+vi.mock('node:child_process', () => ({ spawn: vi.fn() }));
 
+import { spawn } from 'node:child_process';
 import { exec } from '@expo/sudo-prompt';
 import { elevate, shQuote } from '../../src/cli/elevate.js';
 import { CertkitError } from '../../src/core/errors.js';
 
 const execMock = vi.mocked(exec);
+const spawnMock = vi.mocked(spawn);
 
 type ExecCallback = (error?: Error) => void;
 
@@ -89,6 +93,65 @@ describe('elevate', () => {
     await expect(rejection).rejects.toMatchObject({
       code: 'STORE_WRITE_FAILED',
       message: `The elevated command failed or was cancelled. Run it manually with sudo: 'touch' ${shQuote('/tmp/x')}`,
+    });
+  });
+
+  describe('linux sudo branch', () => {
+    function asLinux<T>(run: () => T): T {
+      const originalPlatform = process.platform;
+      Object.defineProperty(process, 'platform', { value: 'linux' });
+      try {
+        return run();
+      } finally {
+        Object.defineProperty(process, 'platform', {
+          value: originalPlatform,
+        });
+      }
+    }
+
+    function fakeChild(exitCode: number): EventEmitter {
+      const child = new EventEmitter();
+      queueMicrotask(() => child.emit('exit', exitCode));
+      return child;
+    }
+
+    it('elevates through plain sudo with inherited stdio', async () => {
+      asLinux(() => {
+        spawnMock.mockReturnValue(fakeChild(0) as never);
+      });
+      await asLinux(() =>
+        expect(elevate(['update-ca-trust'])).resolves.toBeUndefined(),
+      );
+      expect(spawnMock).toHaveBeenCalledWith('sudo', ['update-ca-trust'], {
+        stdio: 'inherit',
+      });
+      expect(execMock).not.toHaveBeenCalled();
+    });
+
+    it('rejects with the manual command when sudo exits nonzero', async () => {
+      asLinux(() => {
+        spawnMock.mockReturnValue(fakeChild(1) as never);
+      });
+      await asLinux(() =>
+        expect(elevate(['update-ca-trust'])).rejects.toMatchObject({
+          code: 'STORE_WRITE_FAILED',
+          message: expect.stringContaining('sudo'),
+        }),
+      );
+    });
+
+    it('rejects when sudo itself is unavailable', async () => {
+      asLinux(() => {
+        const child = new EventEmitter();
+        queueMicrotask(() => child.emit('error', new Error('spawn ENOENT')));
+        spawnMock.mockReturnValue(child as never);
+      });
+      await asLinux(() =>
+        expect(elevate(['update-ca-trust'])).rejects.toMatchObject({
+          code: 'STORE_WRITE_FAILED',
+          message: expect.stringContaining('sudo is unavailable'),
+        }),
+      );
     });
   });
 });
