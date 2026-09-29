@@ -17,21 +17,29 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createInstallCommand } from '../../src/cli/commands/install.js';
 import {
+  adaptersById,
   adapterTargets,
+  emitDryRun,
+  emitResults,
+  inspectInstalled,
   planInstall,
   planUninstall,
+  resolveDependencies,
   type TrustCommandDependencies,
+  targetTrustState,
+  toErrorResult,
 } from '../../src/cli/commands/trust.js';
 import { createUninstallCommand } from '../../src/cli/commands/uninstall.js';
 import { shQuote } from '../../src/cli/elevate.js';
 import type { FsGuard } from '../../src/core/cadir.js';
 import { certificateFor as certificateForCore } from '../../src/core/certificate.js';
 import { CertkitError } from '../../src/core/errors.js';
-import type { Environment } from '../../src/platforms/detect.js';
+import { detect, type Environment } from '../../src/platforms/detect.js';
 import {
   linuxAnchorTarget,
   linuxAnchorTempTarget,
 } from '../../src/platforms/linux.js';
+import { nssCertificateNickname } from '../../src/platforms/nss.js';
 import type { StoreAdapter } from '../../src/platforms/store.js';
 
 const roots: string[] = [];
@@ -1076,6 +1084,27 @@ describe('install command', () => {
     expect(result.stdout[1]).toContain("'certkit development CA <sha256>'");
   });
 
+  it('NSS removal guidance requires fingerprint inspection and stops on duplicates', async () => {
+    const path = join(fixture(), 'ca');
+    await certificateFor(['localhost'], { caDir: path });
+    const db = join(fixture(), 'nssdb');
+
+    const [plan] = planUninstall(
+      [{ store: 'nss', target: db }],
+      join(path, 'ca-cert.pem'),
+      true,
+      state(path).ca.sha256,
+    );
+
+    expect(plan.manual).toContain('certutil');
+    expect(plan.manual).toContain('-L');
+    expect(plan.manual).toContain('SHA-256 fingerprint');
+    expect(plan.manual).toContain('more than one entry');
+    expect(plan.manual).toContain('stop');
+    expect(plan.manual).toContain(plan.command);
+    expect(plan.command).toContain('-D');
+  });
+
   it('uses the exact certificate SHA-1 thumbprint in Windows removal plans', async () => {
     const path = join(fixture(), 'ca');
     await certificateFor(['localhost'], { caDir: path });
@@ -1758,5 +1787,242 @@ describe('uninstall command', () => {
       schemaVersion: 1,
       error: { code: 'UNSUPPORTED_PLATFORM', message: 'no detected store' },
     });
+  });
+});
+
+describe('trust target planning', () => {
+  it('rejects duplicate adapter registrations', () => {
+    expect(() =>
+      adaptersById([fakeAdapter('nss'), fakeAdapter('nss')]),
+    ).toThrow(/More than one adapter registered for nss/);
+  });
+
+  it('plans no NSS targets when detection lists are absent', () => {
+    const env: Environment = {
+      os: 'linux',
+      wsl: false,
+      stores: [{ store: 'nss', detected: true }],
+    };
+
+    expect(adapterTargets(env, 'install')).toEqual([]);
+    expect(adapterTargets(env, 'uninstall')).toEqual([]);
+  });
+
+  it('falls back to the default Linux target without a CA path or known mechanism', () => {
+    expect(
+      adapterTargets(linuxEnvironment('update-ca-certificates'), 'install'),
+    ).toEqual([{ store: 'linux-system', target: 'default' }]);
+    expect(
+      adapterTargets(
+        linuxEnvironment('unknown-mechanism'),
+        'install',
+        '/ca.pem',
+      ),
+    ).toEqual([{ store: 'linux-system', target: 'default' }]);
+  });
+
+  it('reports unknown when the adapter omits the requested trust target', async () => {
+    const adapter = fakeAdapter('nss');
+    adapter.checkTrust = async () => [
+      { target: '/tmp/other-a', state: 'trusted' },
+      { target: '/tmp/other-b', state: 'untrusted' },
+    ];
+
+    await expect(
+      targetTrustState(adapter, 'unused', twoDatabaseEnvironment(), {
+        store: 'nss',
+        target: '/tmp/profile-a',
+      }),
+    ).resolves.toEqual({
+      state: 'unknown',
+      detail: 'The target trust state is unavailable.',
+    });
+  });
+
+  it('reports unknown when the trust probe crashes', async () => {
+    const adapter = fakeAdapter('nss');
+    adapter.checkTrust = async () => {
+      throw new Error('probe crashed');
+    };
+
+    await expect(
+      targetTrustState(adapter, 'unused', twoDatabaseEnvironment(), {
+        store: 'nss',
+        target: '/tmp/profile-a',
+      }),
+    ).resolves.toEqual({
+      state: 'unknown',
+      detail: 'The target trust state is unavailable.',
+    });
+  });
+
+  it('treats a crashing presence probe as inconclusive', async () => {
+    const adapter = fakeAdapter('nss');
+    adapter.inspectInstalled = async () => {
+      throw new Error('inspect crashed');
+    };
+
+    await expect(
+      inspectInstalled(adapter, 'unused', '/tmp/profile-a'),
+    ).resolves.toBe('inconclusive');
+  });
+
+  it('maps non-Error failures to a generic store-write error', () => {
+    expect(toErrorResult('string failure')).toEqual({
+      code: 'STORE_WRITE_FAILED',
+      message: 'Trust operation failed.',
+    });
+  });
+
+  it('prints human-readable results with detail and error suffixes', () => {
+    const result = output();
+
+    emitResults(
+      [
+        {
+          store: 'nss',
+          target: '/tmp/profile-a',
+          state: 'unknown',
+          detail: 'probe failed',
+          error: { code: 'STORE_WRITE_FAILED', message: 'write failed' },
+        },
+      ],
+      false,
+    );
+
+    expect(result.stdout).toEqual([
+      'nss (/tmp/profile-a): unknown — probe failed — write failed',
+    ]);
+  });
+
+  it('uses the real NSS nickname in install plans when the CA identity exists', async () => {
+    const path = join(fixture(), 'ca');
+    await certificateFor(['localhost'], { caDir: path });
+    const certPath = join(path, 'ca-cert.pem');
+    const db = join(fixture(), 'nssdb');
+
+    const [plan] = planInstall([{ store: 'nss', target: db }], certPath, true);
+
+    expect(plan?.command).toContain(
+      nssCertificateNickname(readFileSync(certPath, 'utf8')),
+    );
+    expect(plan?.command).not.toContain('<sha256>');
+    expect(plan?.command).toContain(`'-d' 'sql:${db}'`);
+    expect(plan?.manual).toContain(plan?.command ?? '');
+
+    const bogus = join(fixture(), 'bogus.pem');
+    writeFileSync(bogus, 'not a certificate');
+    const [symbolic] = planInstall([{ store: 'nss', target: db }], bogus, true);
+    expect(symbolic?.command).toContain('certkit development CA <sha256>');
+  });
+
+  it('plans no install commands for unsupported target shapes', () => {
+    expect(
+      planInstall(
+        [{ store: 'macos-keychain', target: 'custom' }],
+        '/ca.pem',
+        false,
+      ),
+    ).toEqual([]);
+    expect(
+      planInstall(
+        [{ store: 'linux-system', target: 'default' }],
+        '/ca.pem',
+        false,
+      ),
+    ).toEqual([]);
+  });
+
+  it('plans no uninstall commands for unsupported target shapes', () => {
+    expect(
+      planUninstall(
+        [{ store: 'macos-keychain', target: 'custom' }],
+        '/ca.pem',
+        false,
+      ),
+    ).toEqual([]);
+    expect(
+      planUninstall(
+        [{ store: 'linux-system', target: 'default' }],
+        '/ca.pem',
+        false,
+      ),
+    ).toEqual([]);
+  });
+
+  it('keeps symbolic removal identities when the recorded fingerprint mismatches', async () => {
+    const path = join(fixture(), 'ca');
+    await certificateFor(['localhost'], { caDir: path });
+    const certPath = join(path, 'ca-cert.pem');
+    const mismatch = 'f'.repeat(64);
+
+    const [nss] = planUninstall(
+      [{ store: 'nss', target: '/tmp/nssdb' }],
+      certPath,
+      true,
+      mismatch,
+    );
+    expect(nss?.command).toContain('certkit development CA <sha256>');
+
+    const [windows] = planUninstall(
+      [{ store: 'windows-root', target: 'default' }],
+      certPath,
+      true,
+      mismatch,
+    );
+    expect(windows?.command).toBe(
+      'certutil -user -delstore Root "<sha1-thumbprint>"',
+    );
+  });
+
+  it('prints an empty dry-run plan with unresolved and unsupported targets', () => {
+    const result = output();
+
+    emitDryRun(
+      [],
+      false,
+      [{ store: 'nss', target: '/tmp/profile-a' }],
+      [{ store: 'linux-system', target: 'default' }],
+    );
+
+    expect(result.stdout).toEqual([
+      'No registered trust-store commands for the detected targets.',
+      'nss (/tmp/profile-a): unknown — A trust write outcome is unresolved; dry-run does not inspect or reconcile it.',
+      'linux-system (default): unknown — No registered linux-system adapter is available for default; it was not modified or verified. See docs/trust-matrix.md for the manual path.',
+    ]);
+  });
+
+  it('omits the macOS authentication note when no macOS command is planned', () => {
+    const result = output();
+
+    emitDryRun(
+      [
+        {
+          store: 'nss',
+          target: '/tmp/nssdb',
+          command: 'certutil -A',
+          manual: 'run certutil -A',
+        },
+      ],
+      false,
+    );
+
+    expect(result.stdout).toEqual([
+      'nss (/tmp/nssdb)',
+      '  command: certutil -A',
+      '  manual: run certutil -A',
+    ]);
+  });
+
+  it('falls back to ambient CA directory and platform detection', () => {
+    const home = fixture();
+    process.env.CERTKIT_HOME = home;
+
+    const resolved = resolveDependencies({});
+
+    expect(resolved.resolveCaDir()).toBe(home);
+    expect(resolved.detect).toBe(detect);
+    if (process.platform === 'win32') expect(resolved.fsGuard).toBeDefined();
+    else expect(resolved.fsGuard).toBeUndefined();
   });
 });

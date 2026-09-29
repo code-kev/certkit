@@ -402,6 +402,16 @@ export function planUninstall(
           // Keep a symbolic nickname when the CA identity cannot be verified.
         }
       }
+      const inspect = [
+        'certutil',
+        '-L',
+        '-n',
+        nickname,
+        '-d',
+        `sql:${target.target}`,
+      ]
+        .map(shQuote)
+        .join(' ');
       const command = [
         'certutil',
         '-D',
@@ -416,7 +426,9 @@ export function planUninstall(
         {
           ...target,
           command,
-          manual: `Remove only the matching CA after checking its fingerprint: ${command}`,
+          // Deleting by nickname with duplicates is ambiguous; the adapter
+          // refuses for the same reason, so the manual path must too.
+          manual: `Inspect first: ${inspect} — confirm the SHA-256 fingerprint matches the CA. If more than one entry matches the nickname, stop; do not delete by nickname. Then remove only the verified entry: ${command}`,
         },
       ];
     }
