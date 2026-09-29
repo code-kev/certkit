@@ -230,6 +230,19 @@ describe('environment detection', () => {
         ),
     ],
     [
+      'Flatpak XDG config',
+      (base: string) =>
+        path.join(
+          base,
+          '.var',
+          'app',
+          'org.mozilla.firefox',
+          'config',
+          'mozilla',
+          'firefox',
+        ),
+    ],
+    [
       'XDG config (Fedora rpm)',
       (base: string) => path.join(base, '.config', 'mozilla', 'firefox'),
     ],

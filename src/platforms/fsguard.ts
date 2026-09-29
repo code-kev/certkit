@@ -51,61 +51,27 @@ function identity(runCommand: CommandRunner): { account: string; sid: string } {
   return { account, sid };
 }
 
-// ACL reads use Get-Acl's SDDL form: it is ASCII (SIDs), unlike icacls text
-// output, which is emitted in the console OEM codepage and corrupts
-// non-ASCII account names/paths when piped.
-// Get-Acl .Sddl substitutes two-letter aliases for well-known SIDs. The map
-// covers the principals that realistically appear on a private directory;
-// rarer aliases (CO, DA, ...) fail closed with a manual icacls hint.
-const SDDL_ALIASES: Record<string, string> = {
-  AN: 'S-1-5-7', // Anonymous
-  AU: 'S-1-5-11', // Authenticated Users
-  BA: 'S-1-5-32-544', // Administrators
-  BU: 'S-1-5-32-545', // Users
-  IU: 'S-1-5-4', // Interactive
-  LS: 'S-1-5-19', // Local Service
-  NS: 'S-1-5-20', // Network Service
-  RD: 'S-1-5-32-555', // Remote Desktop Users
-  SY: 'S-1-5-18', // LocalSystem
-  WD: 'S-1-1-0', // Everyone
-};
-
-function aclSids(path: string, sddl: string): string[] {
-  const daclStart = sddl.indexOf('D:');
-  if (daclStart < 0)
+function aclSids(path: string, output: string): string[] {
+  const result = output.trim();
+  const lines = result ? result.split(/\r?\n/) : [];
+  if (lines.some((sid) => !/^S-\d-\d+(?:-\d+)+$/i.test(sid)))
     throw new CertkitError(
       'CA_UNREADABLE',
-      `Could not parse the Windows ACL for ${path}.`,
+      `Could not parse the Windows ACL for ${path}. Inspect and restrict it manually with: icacls "${path}"`,
     );
-  const [dacl = ''] = sddl
-    .slice(daclStart + 2)
-    .replace(/^[A-Z]*/, '')
-    .split('S:');
-  const sids: string[] = [];
-  for (const match of dacl.matchAll(/\(([^()]*)\)/g)) {
-    const fields = match[1]?.split(';') ?? [];
-    const principal = fields[5] ?? '';
-    const sid = SDDL_ALIASES[principal.toUpperCase()] ?? principal;
-    if (fields.length !== 6 || !/^S-\d-\d+(?:-\d+)+$/i.test(sid))
-      throw new CertkitError(
-        'CA_UNREADABLE',
-        `Could not parse the Windows ACL for ${path}. Inspect and restrict it manually with: icacls "${path}"`,
-      );
-    sids.push(sid.toLowerCase());
-  }
-  return sids;
+  return lines.map((sid) => sid.toLowerCase());
 }
 
 function verifyAcl(path: string, runCommand: CommandRunner): void {
   const current = identity(runCommand);
-  let sddl: string;
+  let output: string;
   try {
-    sddl = runCommand('powershell.exe', [
+    output = runCommand('powershell.exe', [
       '-NoLogo',
       '-NoProfile',
       '-NonInteractive',
       '-Command',
-      `(Get-Acl -LiteralPath '${path.replaceAll("'", "''")}').Sddl`,
+      `$ErrorActionPreference = 'Stop'; (Get-Acl -LiteralPath '${path.replaceAll("'", "''")}').Access | ForEach-Object { $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value }`,
     ]).trim();
   } catch (error) {
     throw new CertkitError(
@@ -114,7 +80,7 @@ function verifyAcl(path: string, runCommand: CommandRunner): void {
       { cause: error },
     );
   }
-  const sids = aclSids(path, sddl);
+  const sids = aclSids(path, output);
   const self = current.sid.toLowerCase();
   const unapproved = sids.filter((sid) => sid !== self);
   if (!sids.length || unapproved.length > 0) {

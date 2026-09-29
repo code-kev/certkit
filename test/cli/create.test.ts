@@ -327,7 +327,7 @@ describe('create command', () => {
             // Directory ACL queries have no file contents.
           }
           calls.push({ path, bytes });
-          return 'O:S-1-5-21-1-2-3G:S-1-5-21-1-2-3D:AI(A;OICI;FA;;;S-1-5-21-1-2-3)';
+          return 'S-1-5-21-1-2-3';
         }
         throw new Error('unexpected ACL invocation');
       });
@@ -395,7 +395,7 @@ describe('create command', () => {
         }
         calls.push({ path, bytes });
         if (path.startsWith(outputDir)) throw new Error('unprotected probe');
-        return 'O:S-1-5-21-1-2-3G:S-1-5-21-1-2-3D:AI(A;OICI;FA;;;S-1-5-21-1-2-3)';
+        return 'S-1-5-21-1-2-3';
       });
       guard.protectDirectory(caDir);
 

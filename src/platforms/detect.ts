@@ -192,6 +192,15 @@ export async function detect(probes: DetectProbes = {}): Promise<Environment> {
               '.mozilla',
               'firefox',
             ),
+            pathApi.join(
+              home,
+              '.var',
+              'app',
+              'org.mozilla.firefox',
+              'config',
+              'mozilla',
+              'firefox',
+            ),
           ];
   const targets: string[] = [];
   for (const base of firefoxBases) {
