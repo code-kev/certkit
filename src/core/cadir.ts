@@ -444,6 +444,15 @@ function lockRecord(path: string, guard?: FsGuard): LockFile {
   return lock as LockFile;
 }
 
+function lockIdentity(path: string): string | undefined {
+  try {
+    const stat = lstatSync(path);
+    return `${stat.dev}:${stat.ino}:${stat.birthtimeMs}:${stat.mtimeMs}`;
+  } catch {
+    return undefined;
+  }
+}
+
 async function initializedLockRecord(
   path: string,
   guard?: FsGuard,
@@ -536,10 +545,18 @@ export async function withLock<T>(
       ) {
         throw unreadable(path, 'Could not create CA lock', error);
       }
+      // Snapshot identity before inspecting: on Windows the guard's icacls
+      // outlives the lock when the holder releases mid-inspection, and a new
+      // holder may have recreated it by the time we check. A changed or
+      // missing lock means the inspected instance is gone, so retry.
+      const identity = lockIdentity(path);
       try {
         await initializedLockRecord(path, guard, deadline);
       } catch (error) {
-        if (error instanceof CertkitError && isMissing(error.cause)) {
+        if (
+          error instanceof CertkitError &&
+          (isMissing(error.cause) || lockIdentity(path) !== identity)
+        ) {
           const remaining = deadline - Date.now();
           if (remaining <= 0) throw lockTimeout(path);
           await sleep(Math.min(50, remaining));
