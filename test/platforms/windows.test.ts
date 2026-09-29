@@ -2,7 +2,7 @@ import { X509Certificate } from 'node:crypto';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mintCa } from '../../src/core/certgen.js';
 import type { Environment } from '../../src/platforms/detect.js';
 import type { RunResult } from '../../src/platforms/run.js';
@@ -52,8 +52,9 @@ function sha1(pem: string): string {
 function adapter(
   _caCertPath: string,
   run: (argv: string[]) => Promise<RunResult>,
+  isInteractive: () => boolean = () => true,
 ) {
-  return createWindowsAdapter({ run });
+  return createWindowsAdapter({ run, isInteractive });
 }
 
 const enumerateArgv = [
@@ -407,5 +408,79 @@ describe('Windows Root store adapter', () => {
       code: 'STORE_WRITE_FAILED',
       message: expect.stringContaining('Could not complete Windows CA removal'),
     });
+  });
+
+  it('refuses install in a non-interactive session without running certutil', async () => {
+    const { ca } = await certificates();
+    const { caCertPath } = await fixture(ca);
+    const calls: string[][] = [];
+    const instance = adapter(
+      caCertPath,
+      async (argv) => {
+        calls.push(argv);
+        return result();
+      },
+      () => false,
+    );
+
+    await expect(instance.install(caCertPath, 'default')).rejects.toMatchObject(
+      {
+        code: 'STORE_WRITE_FAILED',
+        message: expect.stringContaining('interactive'),
+      },
+    );
+    expect(calls).toEqual([]);
+  });
+
+  it('refuses uninstall in a non-interactive session before any deletion', async () => {
+    const { ca } = await certificates();
+    const { caCertPath } = await fixture(ca);
+    const calls: string[][] = [];
+    const instance = adapter(
+      caCertPath,
+      async (argv) => {
+        calls.push(argv);
+        return result(storeOutput(ca));
+      },
+      () => false,
+    );
+
+    await expect(instance.uninstall(ca, 'default')).rejects.toMatchObject({
+      code: 'STORE_WRITE_FAILED',
+      message: expect.stringContaining('interactive'),
+    });
+    expect(calls.some((argv) => argv.includes('-delstore'))).toBe(false);
+  });
+
+  it('default interactivity check treats SSH sessions as non-interactive even with TTYs', async () => {
+    const { ca } = await certificates();
+    const { caCertPath } = await fixture(ca);
+    const stdinTTY = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY');
+    const stdoutTTY = Object.getOwnPropertyDescriptor(process.stdout, 'isTTY');
+    Object.defineProperty(process.stdin, 'isTTY', { value: true });
+    Object.defineProperty(process.stdout, 'isTTY', { value: true });
+    vi.stubEnv('SSH_CONNECTION', '10.0.0.1 22 10.0.0.2 22');
+    try {
+      const instance = createWindowsAdapter({ run: async () => result() });
+      await expect(
+        instance.install(caCertPath, 'default'),
+      ).rejects.toMatchObject({ code: 'STORE_WRITE_FAILED' });
+    } finally {
+      vi.unstubAllEnvs();
+      if (stdinTTY) Object.defineProperty(process.stdin, 'isTTY', stdinTTY);
+      if (stdoutTTY) Object.defineProperty(process.stdout, 'isTTY', stdoutTTY);
+    }
+  });
+
+  it('treats uninstall of an absent CA as a no-op even when non-interactive', async () => {
+    const { ca, other } = await certificates();
+    const { caCertPath } = await fixture(ca);
+    const instance = adapter(
+      caCertPath,
+      async () => result(storeOutput(other)),
+      () => false,
+    );
+
+    await expect(instance.uninstall(ca, 'default')).resolves.toBeUndefined();
   });
 });

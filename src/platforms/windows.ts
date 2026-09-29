@@ -27,6 +27,25 @@ type Command = (argv: string[]) => Promise<RunResult>;
 
 interface WindowsAdapterDependencies {
   run: Command;
+  // certutil pops a GUI consent dialog for add/delstore; in a non-interactive
+  // window station (CI, SSH, piped stdio) it hangs forever with no timeout.
+  // The default check is a proxy — TTYs plus no SSH markers — because Node
+  // cannot observe the window station; an SSH session with a PTY has TTYs
+  // but no visible desktop.
+  isInteractive?: () => boolean;
+}
+
+function assertInteractive(isInteractive: (() => boolean) | undefined): void {
+  const viaSsh = ['SSH_CONNECTION', 'SSH_TTY'].some(
+    (name) => process.env[name],
+  );
+  const interactive =
+    isInteractive?.() ??
+    Boolean(process.stdin.isTTY && process.stdout.isTTY && !viaSsh);
+  if (!interactive)
+    throw writeFailure(
+      'Windows requires interactive consent to modify the Root store, but this session is non-interactive; re-run in an interactive terminal (not CI, SSH, or a pipe).',
+    );
 }
 
 function certificateHashes(pem: string): { sha256: string; sha1: string } {
@@ -89,7 +108,7 @@ function assertDefaultTarget(target: string): void {
 export function createWindowsAdapter(
   dependencies: WindowsAdapterDependencies,
 ): StoreAdapter {
-  const { run } = dependencies;
+  const { run, isInteractive } = dependencies;
   return {
     id: 'windows-root',
 
@@ -150,6 +169,7 @@ export function createWindowsAdapter(
 
     async install(certPath, target) {
       assertDefaultTarget(target);
+      assertInteractive(isInteractive);
       try {
         const { sha1 } = certificateHashes(await readFile(certPath, 'utf8'));
         const added = await run(windowsInstallArgv(certPath));
@@ -196,6 +216,7 @@ export function createWindowsAdapter(
         );
         if (!match) return;
 
+        assertInteractive(isInteractive);
         const removed = await run(windowsDeleteCertificateArgv(match.sha1));
         if (removed.code !== 0)
           throw writeFailure(
