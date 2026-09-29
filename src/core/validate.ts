@@ -10,14 +10,16 @@ export type ValidName =
  * The X.509 SAN encoder parses IP strings itself, so a non-canonical IPv6
  * literal (for example the IPv4-mapped `::ffff:127.0.0.1`) is encoded as the
  * wrong address and breaks the cache identity. Canonicalize here, the shared
- * boundary every caller routes through.
+ * boundary every caller routes through. A zone-id suffix (`%eth0`) is
+ * stripped: the SAN carries the address, never the zone.
  */
 function canonicalIp(ip: string): string {
-  const address = ip.split('%')[0] ?? ip;
+  const [address = ip] = ip.split('%');
   if (isIP(address) !== 6) return address;
   try {
     return new URL(`http://[${address}]/`).hostname.slice(1, -1);
   } catch {
+    // Not URL-parseable; the SAN encoder rejects or handles the raw form.
     return address;
   }
 }
