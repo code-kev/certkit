@@ -165,7 +165,7 @@ describe('platform command runner', () => {
 
   it('probes the NSS program-files locations on Windows', async () => {
     setPlatform('win32');
-    await expect(resolveNssCertutil()).resolves.toBeNull();
+    await expect(resolveNssCertutil({})).resolves.toBeNull();
   });
 
   it('probes the Homebrew and /usr/local locations on macOS', async () => {
@@ -174,13 +174,13 @@ describe('platform command runner', () => {
       null,
       '/opt/homebrew/bin/certutil',
       '/usr/local/bin/certutil',
-    ]).toContain(await resolveNssCertutil());
+    ]).toContain(await resolveNssCertutil({}));
   });
 
   it('probes the system locations on Linux', async () => {
     setPlatform('linux');
     expect([null, '/usr/bin/certutil', '/usr/local/bin/certutil']).toContain(
-      await resolveNssCertutil(),
+      await resolveNssCertutil({}),
     );
   });
 });

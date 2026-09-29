@@ -181,11 +181,17 @@ jobs:
         run: |
           $certutil = Join-Path $env:MSYS2_LOCATION 'ucrt64\bin\certutil.exe'
           if (-not (Test-Path $certutil)) { throw 'Mozilla NSS certutil missing' }
+          $nssBin = Split-Path $certutil
+          $env:PATH = "$nssBin;$env:PATH"
+          $nssBin >> $env:GITHUB_PATH
           "CERTKIT_CERTUTIL=$certutil" >> $env:GITHUB_ENV
           $db = Join-Path $env:RUNNER_TEMP 'nss-preflight'
           New-Item -ItemType Directory -Path $db -Force | Out-Null
           & $certutil -N -d "sql:$db" --empty-password
-          if ($LASTEXITCODE -ne 0) { throw 'NSS oracle initialization failed' }
+          if ($LASTEXITCODE -ne 0) {
+            $exitHex = '0x{0:X8}' -f ($LASTEXITCODE -band 0xffffffffL)
+            throw "NSS oracle initialization failed: exit $LASTEXITCODE ($exitHex)"
+          }
           Remove-Item $db -Recurse -Force
           if (-not (Get-Command openssl -ErrorAction SilentlyContinue)) { throw 'OpenSSL missing' }
           $version = & openssl version
