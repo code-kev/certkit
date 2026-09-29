@@ -206,6 +206,10 @@ describe('environment detection', () => {
           'firefox',
         ),
     ],
+    [
+      'XDG config (Fedora rpm)',
+      (base: string) => path.join(base, '.config', 'mozilla', 'firefox'),
+    ],
   ] as const)('finds %s Firefox profiles', async (_kind, profileBase) => {
     const base = profileBase(home);
     const profile = path.join(base, 'release');

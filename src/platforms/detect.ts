@@ -169,6 +169,9 @@ export async function detect(probes: DetectProbes = {}): Promise<Environment> {
         : [
             pathApi.join(home, '.mozilla', 'firefox'),
             pathApi.join(home, '.mozilla', 'firefox-esr'),
+            // Fedora's Firefox package (and upstream's XDG migration) keeps
+            // profiles under the XDG config dir instead of ~/.mozilla.
+            pathApi.join(home, '.config', 'mozilla', 'firefox'),
             pathApi.join(
               home,
               'snap',
