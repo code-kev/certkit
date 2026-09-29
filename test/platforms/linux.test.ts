@@ -84,13 +84,14 @@ async function fixture(): Promise<{
             .join('\n'),
         );
       } else if (argv[0] === 'update-ca-trust') {
+        // p11-kit emits `# <name>` comment lines between certificates.
         files.set(
           linuxActiveStorePath('update-ca-trust'),
           [...files.entries()]
             .filter(([path]) =>
               path.startsWith('/etc/pki/ca-trust/source/anchors/'),
             )
-            .map(([, contents]) => contents)
+            .map(([, contents]) => `# fixture CA\n${contents}`)
             .join('\n'),
         );
       }
