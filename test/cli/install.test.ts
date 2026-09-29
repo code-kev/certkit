@@ -296,7 +296,7 @@ afterEach(() => {
 });
 
 describe('install command', () => {
-  it('quotes hostile path segments for the sudo-prompt command string', () => {
+  it('quotes hostile path segments for the elevated command string', () => {
     expect(shQuote("/tmp/ev il'$(touch /tmp/pwned)`/")).toBe(
       "'/tmp/ev il'\\''$(touch /tmp/pwned)`/'",
     );

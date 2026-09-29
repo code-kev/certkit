@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { mintCa } from '../../src/core/certgen.js';
+import { CertkitError } from '../../src/core/errors.js';
 import type { Environment } from '../../src/platforms/detect.js';
 import {
   createLinuxAdapter,
@@ -687,6 +688,29 @@ describe('Linux system trust adapter', () => {
     ).rejects.toMatchObject({
       code: 'STORE_WRITE_FAILED',
       message: expect.stringContaining('rerun `certkit install`'),
+    });
+  });
+
+  it('surfaces the elevate layer manual guidance on failure', async () => {
+    const { caCertPath, files } = await fixture();
+    const target = linuxAnchorTarget(caCertPath, 'update-ca-trust');
+    const failing = createLinuxAdapter({
+      caCertPath,
+      run: async () => result(),
+      fs: fixtureFs(files, caCertPath),
+      elevate: async () => {
+        throw new CertkitError(
+          'STORE_WRITE_FAILED',
+          "The elevated command failed or was cancelled. Run it manually with sudo: 'install' '-m' '0644'",
+        );
+      },
+    });
+
+    await expect(
+      failing.install(caCertPath, target, 'update-ca-trust'),
+    ).rejects.toMatchObject({
+      code: 'STORE_WRITE_FAILED',
+      message: expect.stringContaining('Run it manually with sudo'),
     });
   });
 

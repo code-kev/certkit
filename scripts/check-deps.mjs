@@ -13,7 +13,6 @@ const allowed = new Set([
   'tslib',
   'citty',
   'picocolors',
-  '@expo/sudo-prompt',
 ]);
 const allowedPrefixes = ['@peculiar/asn1-'];
 const lifecycleScripts = ['preinstall', 'install', 'postinstall'];

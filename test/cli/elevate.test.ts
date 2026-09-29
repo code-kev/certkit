@@ -4,8 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 vi.mock('node:child_process', () => ({ spawn: vi.fn() }));
 
 import { spawn } from 'node:child_process';
-import { elevate, shQuote } from '../../src/cli/elevate.js';
-import { CertkitError } from '../../src/core/errors.js';
+import { elevate } from '../../src/cli/elevate.js';
 
 const spawnMock = vi.mocked(spawn);
 
