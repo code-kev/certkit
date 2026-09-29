@@ -187,11 +187,14 @@ jobs:
           "CERTKIT_CERTUTIL=$certutil" >> $env:GITHUB_ENV
           $db = Join-Path $env:RUNNER_TEMP 'nss-preflight'
           New-Item -ItemType Directory -Path $db -Force | Out-Null
-          & $certutil -N -d "sql:$db" --empty-password
-          if ($LASTEXITCODE -ne 0) {
-            $exitHex = '0x{0:X8}' -f ($LASTEXITCODE -band 0xffffffffL)
-            throw "NSS oracle initialization failed: exit $LASTEXITCODE ($exitHex)"
-          }
+          $probe = @'
+          const { spawnSync } = require('node:child_process');
+          const result = spawnSync(process.argv[1], ['-N', '-d', `sql:${process.argv[2]}`, '--empty-password'], { encoding: 'utf8', timeout: 30000 });
+          console.log(JSON.stringify({ status: result.status, signal: result.signal, error: result.error?.message, stdout: result.stdout, stderr: result.stderr }));
+          if (result.status !== 0) process.exit(1);
+          '@
+          node -e $probe $certutil $db
+          if ($LASTEXITCODE -ne 0) { throw 'NSS oracle initialization failed' }
           Remove-Item $db -Recurse -Force
           if (-not (Get-Command openssl -ErrorAction SilentlyContinue)) { throw 'OpenSSL missing' }
           $version = & openssl version

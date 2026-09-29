@@ -1,7 +1,14 @@
 import assert from 'node:assert/strict';
 import { execFile as execFileCallback } from 'node:child_process';
 import { X509Certificate } from 'node:crypto';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import {
+  access,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from 'node:fs/promises';
 import https from 'node:https';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -285,7 +292,7 @@ async function macosTrust({
       0,
       `missing oracle: ${tool}`,
     );
-  const keychainPath = path.join(dir, 'throwaway.keychain-db');
+  const keychainPath = path.join(await realpath(dir), 'throwaway.keychain-db');
   const originalKeychains = parseKeychains(
     (await nativeRun(['security', 'list-keychains', '-d', 'user'])).stdout,
   );
@@ -301,6 +308,7 @@ async function macosTrust({
   try {
     await command(['security', 'create-keychain', '-p', '', keychainPath]);
     keychainCreated = true;
+    await access(keychainPath);
     await command(['security', 'unlock-keychain', '-p', '', keychainPath]);
     await command([
       'security',
@@ -319,10 +327,19 @@ async function macosTrust({
       keychainPath,
     ]);
     changedKeychainList = true;
+    const visibleKeychains = parseKeychains(
+      (await nativeRun(['security', 'list-keychains', '-d', 'user'])).stdout,
+    );
+    assert(
+      visibleKeychains.includes(keychainPath),
+      `throwaway keychain missing from native search list: ${JSON.stringify(visibleKeychains)}`,
+    );
 
+    const initialTrust = await adapter.checkTrust(bundle.caCert, environment);
     assert.equal(
-      (await adapter.checkTrust(bundle.caCert, environment))[0]?.state,
+      initialTrust[0]?.state,
       'untrusted',
+      JSON.stringify(initialTrust),
     );
     assert.equal(
       await adapter.inspectInstalled(bundle.caCert, 'default'),
