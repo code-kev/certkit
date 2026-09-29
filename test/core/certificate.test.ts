@@ -902,6 +902,45 @@ describe('atomic write failures', () => {
     });
   });
 
+  it('fails typed and recovers when a temporary write fails (ENOSPC class)', async () => {
+    let tempFd: number | undefined;
+    const restoreOpen = patchBuiltin(
+      fs,
+      'openSync',
+      (original) =>
+        ((path, ...rest) => {
+          const fd = original(path, ...rest);
+          if (/\.certkit-.*\.tmp$/.test(String(path))) tempFd = fd as number;
+          return fd;
+        }) as typeof fs.openSync,
+    );
+    const restoreWrite = patchBuiltin(
+      fs,
+      'writeFileSync',
+      (original) =>
+        ((target, ...rest) => {
+          if (typeof target === 'number' && target === tempFd)
+            throw Object.assign(new Error('no space left on device'), {
+              code: 'ENOSPC',
+            });
+          return original(target, ...rest);
+        }) as typeof fs.writeFileSync,
+    );
+    try {
+      await expect(
+        certificateFor(['localhost'], { caDir: dir }),
+      ).rejects.toBeInstanceOf(CertkitError);
+    } finally {
+      restoreOpen();
+      restoreWrite();
+    }
+    expect(readdirSync(dir).some((name) => name.endsWith('.tmp'))).toBe(false);
+
+    const result = await certificateFor(['localhost'], { caDir: dir });
+    expect(result.cert).toContain('-----BEGIN CERTIFICATE-----');
+    expect(readState(dir)?.phase).toBe('active');
+  });
+
   it('fails closed when freshly written CA material cannot be read back', async () => {
     const restore = patchBuiltin(
       fs,
