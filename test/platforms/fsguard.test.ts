@@ -9,17 +9,15 @@ vi.mock('node:child_process', () => ({ execFileSync: mocks.execFileSync }));
 
 const path = 'C:\\Users\\test\\AppData\\Local\\certkit';
 const whoamiCsv = '"DOMAIN\\test","S-1-5-21-1-2-3-1001"';
-const selfAcl = [
-  '                  DOMAIN\\test:(OI)(CI)(F)',
-  'Successfully processed 1 files; Failed processing 0 files',
-].join('\r\n');
+const selfSid = 'S-1-5-21-1-2-3-1001';
+const selfSddl = `O:${selfSid}G:${selfSid}D:AI(A;OICI;FA;;;${selfSid})`;
 const success = 'Successfully processed 1 files; Failed processing 0 files';
 
-function runner(acl: string, whoami: string = whoamiCsv): CommandRunner {
+function runner(sddl: string, whoami: string = whoamiCsv): CommandRunner {
   return (command, args) => {
     if (command === 'whoami') return whoami;
     if (args.includes('/inheritance:r')) return success;
-    return acl;
+    return sddl;
   };
 }
 
@@ -31,7 +29,7 @@ describe('Windows filesystem guard', () => {
           ? whoamiCsv
           : args?.includes('/inheritance:r')
             ? success
-            : selfAcl,
+            : selfSddl,
     );
     const guard = createWindowsFsGuard();
 
@@ -76,7 +74,7 @@ describe('Windows filesystem guard', () => {
     ['a missing SID', '"DOMAIN\\test"'],
     ['a malformed SID', '"DOMAIN\\test","bogus"'],
   ])('rejects whoami output with %s', (_name, output) => {
-    const guard = createWindowsFsGuard(runner(selfAcl, output));
+    const guard = createWindowsFsGuard(runner(selfSddl, output));
     expect(() => guard.protectDirectory(path)).toThrowError(
       expect.objectContaining({
         code: 'CA_UNREADABLE',
@@ -85,58 +83,50 @@ describe('Windows filesystem guard', () => {
     );
   });
 
-  it('accepts unquoted whoami output and blank lines in icacls output', () => {
-    const acl = [
-      '',
-      '                  DOMAIN\\test:(OI)(CI)(F)',
-      '',
-      success,
-    ].join('\r\n');
-    const guard = createWindowsFsGuard(
-      runner(acl, 'DOMAIN\\test,S-1-5-21-1-2-3-1001'),
+  it('reads the ACL as SDDL via PowerShell with a quoted literal path', () => {
+    const seen: string[][] = [];
+    const guard = createWindowsFsGuard((command, args) => {
+      seen.push([command, ...args]);
+      if (command === 'whoami') return whoamiCsv;
+      return selfSddl;
+    });
+    const quoted = "C:\\Users\\o'brien\\certkit";
+
+    expect(() => guard.assertProtectedDirectory(quoted)).not.toThrow();
+    const ps = seen.find(([command]) => command === 'powershell.exe');
+    expect(ps?.[1]).toBe('-NoLogo');
+    expect(ps?.[5]).toBe(
+      `(Get-Acl -LiteralPath 'C:\\Users\\o''brien\\certkit').Sddl`,
     );
-    expect(() => guard.protectDirectory(path)).not.toThrow();
   });
 
-  it('normalizes ACL path headers and accepts the SID principal form', () => {
-    const acl = [
-      'C:/Users/test/AppData/Local/certkit\\',
-      '                  *S-1-5-21-1-2-3-1001:(OI)(CI)(F)',
-      success,
-    ].join('\r\n');
-    const guard = createWindowsFsGuard(runner(acl));
+  it('accepts a self-only ACL regardless of account-name encoding', () => {
+    // whoami account names with non-ASCII characters arrive mangled when the
+    // console codepage is not UTF-8; the SID comparison must not depend on it.
+    const guard = createWindowsFsGuard(
+      runner(selfSddl, '"DOMAIN\\Jos\uFFFD","S-1-5-21-1-2-3-1001"'),
+    );
     expect(() => guard.assertProtectedDirectory(path)).not.toThrow();
   });
 
-  it('rejects an ACL entry with malformed rights', () => {
-    const acl = [
-      'Everyone:(F',
-      '                  DOMAIN\\test:(OI)(CI)(F)',
-      success,
-    ].join('\r\n');
-    const guard = createWindowsFsGuard(runner(acl));
-    expect(() => guard.assertProtectedFile(`${path}\\ca.pem`)).toThrowError(
-      expect.objectContaining({
-        code: 'CA_UNREADABLE',
-        message: expect.stringContaining('Could not parse a Windows ACL entry'),
-      }),
-    );
+  it('rejects SDDL without a DACL or with a malformed ACE', () => {
+    for (const bad of [
+      `O:${selfSid}G:${selfSid}`,
+      `D:AI(A;OICI;FA;;bogus-sid;)`,
+      `D:AI(A;OICI;FA)`,
+    ]) {
+      const guard = createWindowsFsGuard(runner(bad));
+      expect(() => guard.assertProtectedDirectory(path)).toThrowError(
+        expect.objectContaining({
+          code: 'CA_UNREADABLE',
+          message: expect.stringContaining('Could not parse the Windows ACL'),
+        }),
+      );
+    }
   });
 
-  it('rejects an ACL entry whose principal strips to empty', () => {
-    const guard = createWindowsFsGuard(runner(`C:\\:(F)\r\n${success}`));
-    expect(() => guard.assertProtectedDirectory('C:\\')).toThrowError(
-      expect.objectContaining({
-        code: 'CA_UNREADABLE',
-        message: expect.stringContaining(
-          'Could not parse a Windows ACL principal',
-        ),
-      }),
-    );
-  });
-
-  it('fails closed with a bare icacls command when the ACL has no entries', () => {
-    const guard = createWindowsFsGuard(runner(`${path}\r\n${success}`));
+  it('fails closed with a bare icacls command when the DACL has no entries', () => {
+    const guard = createWindowsFsGuard(runner(`O:${selfSid}G:${selfSid}D:`));
     expect(() => guard.assertProtectedDirectory(path)).toThrowError(
       expect.objectContaining({
         code: 'CA_UNREADABLE',
@@ -145,27 +135,33 @@ describe('Windows filesystem guard', () => {
     );
   });
 
-  it('fails closed on a path-prefixed principal without a separator', () => {
-    const acl = [`${path}Everyone:(F)`, selfAcl].join('\r\n');
-    const guard = createWindowsFsGuard(runner(acl));
-    expect(() => guard.assertProtectedDirectory(path)).toThrowError(
-      expect.objectContaining({ code: 'CA_UNREADABLE' }),
-    );
-  });
-
-  it('lists unapproved principals as manual remove commands', () => {
-    const acl = [
-      '                  DOMAIN\\test:(OI)(CI)(F)',
-      '                  Everyone:(RX)',
-      success,
-    ].join('\r\n');
-    const guard = createWindowsFsGuard(runner(acl));
+  it('resolves well-known SDDL aliases to SIDs in remove commands', () => {
+    // Real Get-Acl output aliases Everyone to WD, SYSTEM to SY, etc.
+    const sddl = `O:${selfSid}G:${selfSid}D:AI(A;OICI;FA;;;${selfSid})(A;CI;RX;;;WD)`;
+    const guard = createWindowsFsGuard(runner(sddl));
     expect(() => guard.assertProtectedDirectory(path)).toThrowError(
       expect.objectContaining({
         code: 'CA_UNREADABLE',
         message: expect.stringContaining(
-          `icacls "${path}" /remove:g "everyone"`,
+          `icacls "${path}" /remove:g "*s-1-1-0"`,
         ),
+      }),
+    );
+  });
+
+  it('ignores the SACL section when the DACL is self-only', () => {
+    const sddl = `O:${selfSid}G:${selfSid}D:AI(A;OICI;FA;;;${selfSid})S:AI(AU;SA;FA;;;WD)`;
+    const guard = createWindowsFsGuard(runner(sddl));
+    expect(() => guard.assertProtectedDirectory(path)).not.toThrow();
+  });
+
+  it('treats a deny ACE for another principal as unapproved', () => {
+    const sddl = `O:${selfSid}G:${selfSid}D:(A;OICI;FA;;;${selfSid})(D;;RX;;;BU)`;
+    const guard = createWindowsFsGuard(runner(sddl));
+    expect(() => guard.assertProtectedDirectory(path)).toThrowError(
+      expect.objectContaining({
+        code: 'CA_UNREADABLE',
+        message: expect.stringContaining('*s-1-5-32-545'),
       }),
     );
   });
@@ -173,7 +169,7 @@ describe('Windows filesystem guard', () => {
   it('fails closed when the ACL cannot be re-read', () => {
     const guard = createWindowsFsGuard((command) => {
       if (command === 'whoami') return whoamiCsv;
-      throw new Error('icacls denied');
+      throw new Error('powershell denied');
     });
     expect(() => guard.assertProtectedDirectory(path)).toThrowError(
       expect.objectContaining({

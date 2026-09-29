@@ -51,66 +51,60 @@ function identity(runCommand: CommandRunner): { account: string; sid: string } {
   return { account, sid };
 }
 
-function aclPrincipals(path: string, output: string): string[] {
-  const normalizedPath = path.replaceAll('/', '\\').toLowerCase();
-  const pathPrefix = /^[a-z]:\\$/i.test(normalizedPath)
-    ? normalizedPath
-    : normalizedPath.replace(/\\+$/, '');
-  const principals: string[] = [];
+// ACL reads use Get-Acl's SDDL form: it is ASCII (SIDs), unlike icacls text
+// output, which is emitted in the console OEM codepage and corrupts
+// non-ASCII account names/paths when piped.
+// Get-Acl .Sddl substitutes two-letter aliases for well-known SIDs.
+const SDDL_ALIASES: Record<string, string> = {
+  AN: 'S-1-5-7', // Anonymous
+  AU: 'S-1-5-11', // Authenticated Users
+  BA: 'S-1-5-32-544', // Administrators
+  BU: 'S-1-5-32-545', // Users
+  IU: 'S-1-5-4', // Interactive
+  LS: 'S-1-5-19', // Local Service
+  NS: 'S-1-5-20', // Network Service
+  RD: 'S-1-5-32-555', // Remote Desktop Users
+  SY: 'S-1-5-18', // LocalSystem
+  WD: 'S-1-1-0', // Everyone
+};
 
-  for (const rawLine of output.split(/\r?\n/)) {
-    const line = rawLine.trim();
-    if (!line) continue;
-    const marker = line.indexOf(':(');
-    if (marker < 0) {
-      const linePath = line
-        .replaceAll('/', '\\')
-        .replace(/\\+$/, '')
-        .toLowerCase();
-      const isPathHeader = linePath === normalizedPath.replace(/\\+$/, '');
-      const isSuccessFooter =
-        /^Successfully processed \d+ files?; Failed processing 0 files?$/i.test(
-          line,
-        );
-      if (!isPathHeader && !isSuccessFooter) {
-        throw new CertkitError(
-          'CA_UNREADABLE',
-          `Could not parse a Windows ACL entry for ${path}: ${line}`,
-        );
-      }
-      continue;
-    }
-
-    const rights = line.slice(marker + 1);
-    if (!/^(?:\([^()\r\n]+\))+$/.test(rights)) {
+function aclSids(path: string, sddl: string): string[] {
+  const daclStart = sddl.indexOf('D:');
+  if (daclStart < 0)
+    throw new CertkitError(
+      'CA_UNREADABLE',
+      `Could not parse the Windows ACL for ${path}.`,
+    );
+  const [dacl = ''] = sddl
+    .slice(daclStart + 2)
+    .replace(/^[A-Z]*/, '')
+    .split('S:');
+  const sids: string[] = [];
+  for (const match of dacl.matchAll(/\(([^()]*)\)/g)) {
+    const fields = match[1]?.split(';') ?? [];
+    const principal = fields[5] ?? '';
+    const sid = SDDL_ALIASES[principal.toUpperCase()] ?? principal;
+    if (fields.length !== 6 || !/^S-\d-\d+(?:-\d+)+$/i.test(sid))
       throw new CertkitError(
         'CA_UNREADABLE',
-        `Could not parse a Windows ACL entry for ${path}: ${line}`,
+        `Could not parse the Windows ACL for ${path}. Inspect and restrict it manually with: icacls "${path}"`,
       );
-    }
-    let principal = line.slice(0, marker).trim();
-    const principalPrefix = principal.replaceAll('/', '\\').toLowerCase();
-    if (principalPrefix.startsWith(pathPrefix)) {
-      const suffix = principal.slice(pathPrefix.length);
-      const driveRoot = /^[a-z]:\\$/i.test(pathPrefix);
-      if (driveRoot || /^\s/.test(suffix)) principal = suffix.trim();
-    }
-    if (!principal) {
-      throw new CertkitError(
-        'CA_UNREADABLE',
-        `Could not parse a Windows ACL principal for ${path}: ${line}`,
-      );
-    }
-    principals.push(principal.toLowerCase());
+    sids.push(sid.toLowerCase());
   }
-  return principals;
+  return sids;
 }
 
 function verifyAcl(path: string, runCommand: CommandRunner): void {
   const current = identity(runCommand);
-  let output: string;
+  let sddl: string;
   try {
-    output = runCommand('icacls', [path]);
+    sddl = runCommand('powershell.exe', [
+      '-NoLogo',
+      '-NoProfile',
+      '-NonInteractive',
+      '-Command',
+      `(Get-Acl -LiteralPath '${path.replaceAll("'", "''")}').Sddl`,
+    ]).trim();
   } catch (error) {
     throw new CertkitError(
       'CA_UNREADABLE',
@@ -118,17 +112,13 @@ function verifyAcl(path: string, runCommand: CommandRunner): void {
       { cause: error },
     );
   }
-  const principals = aclPrincipals(path, output);
-  const self = new Set([
-    current.account.toLowerCase(),
-    `*${current.sid}`.toLowerCase(),
-    current.sid.toLowerCase(),
-  ]);
-  const unapproved = principals.filter((principal) => !self.has(principal));
-  if (!principals.length || unapproved.length > 0) {
+  const sids = aclSids(path, sddl);
+  const self = current.sid.toLowerCase();
+  const unapproved = sids.filter((sid) => sid !== self);
+  if (!sids.length || unapproved.length > 0) {
     const command = unapproved.length
       ? unapproved
-          .map((principal) => `icacls "${path}" /remove:g "${principal}"`)
+          .map((sid) => `icacls "${path}" /remove:g "*${sid}"`)
           .join(' & ')
       : `icacls "${path}"`;
     throw new CertkitError(

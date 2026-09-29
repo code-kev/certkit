@@ -694,7 +694,7 @@ it.skipIf(workerDir)(
 );
 
 describe('Windows ACL guard', () => {
-  it('uses icacls argv and accepts the current user grant', () => {
+  it('establishes the ACL with icacls and accepts the current user grant', () => {
     const path = 'C:\\Users\\test\\AppData\\Local\\certkit';
     const calls: Array<{ command: string; args: readonly string[] }> = [];
     const run = (command: string, args: readonly string[]) => {
@@ -702,10 +702,7 @@ describe('Windows ACL guard', () => {
       if (command === 'whoami') return '"DOMAIN\\test","S-1-5-21-1-2-3-1001"';
       if (args.includes('/inheritance:r'))
         return 'Successfully processed 1 files; Failed processing 0 files';
-      return [
-        '                  DOMAIN\\test:(OI)(CI)(F)',
-        'Successfully processed 1 files; Failed processing 0 files',
-      ].join('\r\n');
+      return 'O:S-1-5-21-1-2-3-1001G:S-1-5-21-1-2-3-1001D:AI(A;OICI;FA;;;S-1-5-21-1-2-3-1001)';
     };
     const guard = createWindowsFsGuard(run);
     expect(() => guard.protectDirectory(path)).not.toThrow();
@@ -726,11 +723,7 @@ describe('Windows ACL guard', () => {
       if (command === 'whoami') return '"DOMAIN\\test","S-1-5-21-1-2-3-1001"';
       if (args.includes('/inheritance:r'))
         return 'Successfully processed 1 files; Failed processing 0 files';
-      return [
-        '                  DOMAIN\\test:(OI)(CI)(F)',
-        '                  Everyone:(RX)',
-        'Successfully processed 1 files; Failed processing 0 files',
-      ].join('\r\n');
+      return 'O:S-1-5-21-1-2-3-1001G:S-1-5-21-1-2-3-1001D:AI(A;OICI;FA;;;S-1-5-21-1-2-3-1001)(A;CI;RX;;;WD)';
     };
     const guard = createWindowsFsGuard(run);
     expect(() => guard.protectDirectory(path)).toThrowError(
@@ -739,19 +732,15 @@ describe('Windows ACL guard', () => {
   });
 
   it.each([
-    ['SYSTEM', 'NT AUTHORITY\\SYSTEM'],
-    ['Administrators', 'BUILTIN\\Administrators'],
-  ])('fails closed on an unverified explicit %s grant', (_name, principal) => {
+    ['SYSTEM', 'SY'],
+    ['Administrators', 'BA'],
+  ])('fails closed on an unverified explicit %s grant', (_name, alias) => {
     const path = 'C:\\Users\\test\\AppData\\Local\\certkit';
     const run = (command: string, args: readonly string[]) => {
       if (command === 'whoami') return '"DOMAIN\\test","S-1-5-21-1-2-3-1001"';
       if (args.includes('/inheritance:r'))
         return 'Successfully processed 1 files; Failed processing 0 files';
-      return [
-        `${path} ${principal}:(F)`,
-        '                  DOMAIN\\test:(OI)(CI)(F)',
-        'Successfully processed 1 files; Failed processing 0 files',
-      ].join('\r\n');
+      return `O:S-1-5-21-1-2-3-1001G:S-1-5-21-1-2-3-1001D:AI(A;OICI;FA;;;S-1-5-21-1-2-3-1001)(A;CI;FA;;;${alias})`;
     };
     const guard = createWindowsFsGuard(run);
     expect(() => guard.protectDirectory(path)).toThrowError(
@@ -759,17 +748,13 @@ describe('Windows ACL guard', () => {
     );
   });
 
-  it('does not skip a broad first ACE on a drive-root path', () => {
+  it('fails closed on a broad non-self grant on a drive-root path', () => {
     const path = 'C:\\';
     const run = (command: string, args: readonly string[]) => {
       if (command === 'whoami') return '"DOMAIN\\test","S-1-5-21-1-2-3-1001"';
       if (args.includes('/inheritance:r'))
         return 'Successfully processed 1 files; Failed processing 0 files';
-      return [
-        `${path}Everyone:(OI)(CI)(F)`,
-        '                  DOMAIN\\test:(OI)(CI)(F)',
-        'Successfully processed 1 files; Failed processing 0 files',
-      ].join('\r\n');
+      return 'O:S-1-5-21-1-2-3-1001G:S-1-5-21-1-2-3-1001D:AI(A;OICI;FA;;;WD)';
     };
     const guard = createWindowsFsGuard(run);
     expect(() => guard.protectDirectory(path)).toThrowError(
@@ -783,11 +768,7 @@ describe('Windows ACL guard', () => {
       if (command === 'whoami') return '"DOMAIN\\test","S-1-5-21-1-2-3-1001"';
       if (args.includes('/inheritance:r'))
         return 'Successfully processed 1 files; Failed processing 0 files';
-      return [
-        `${path} Everyone:unparsed-grant`,
-        '                  DOMAIN\\test:(OI)(CI)(F)',
-        'Successfully processed 1 files; Failed processing 0 files',
-      ].join('\r\n');
+      return 'D:AI(A;OICI;FA);unparsed;';
     };
     const guard = createWindowsFsGuard(run);
     expect(() => guard.protectDirectory(path)).toThrowError(
@@ -795,17 +776,13 @@ describe('Windows ACL guard', () => {
     );
   });
 
-  it('fails closed on an unrecognized nonempty ACL line', () => {
+  it('fails closed on an SDDL string without a DACL', () => {
     const path = 'C:\\Users\\test\\AppData\\Local\\certkit';
     const run = (command: string, args: readonly string[]) => {
       if (command === 'whoami') return '"DOMAIN\\test","S-1-5-21-1-2-3-1001"';
       if (args.includes('/inheritance:r'))
         return 'Successfully processed 1 files; Failed processing 0 files';
-      return [
-        'Everyone F',
-        '                  DOMAIN\\test:(OI)(CI)(F)',
-        'Successfully processed 1 files; Failed processing 0 files',
-      ].join('\r\n');
+      return 'O:S-1-5-18G:S-1-5-18';
     };
     const guard = createWindowsFsGuard(run);
     expect(() => guard.protectDirectory(path)).toThrowError(

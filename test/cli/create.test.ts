@@ -317,7 +317,8 @@ describe('create command', () => {
       const guard = createWindowsFsGuard((command, argv) => {
         if (command === 'whoami') return '"USER","S-1-5-21-1-2-3"';
         if (argv.includes('/inheritance:r')) return '';
-        const path = argv[0];
+        const match = /-LiteralPath '((?:[^']|'')*)'/.exec(argv[4] ?? '');
+        const path = match?.[1]?.replaceAll("''", "'");
         if (path) {
           let bytes = -1;
           try {
@@ -326,9 +327,9 @@ describe('create command', () => {
             // Directory ACL queries have no file contents.
           }
           calls.push({ path, bytes });
-          return `${path} USER:(F)`;
+          return 'O:S-1-5-21-1-2-3G:S-1-5-21-1-2-3D:AI(A;OICI;FA;;;S-1-5-21-1-2-3)';
         }
-        throw new Error('unexpected icacls invocation');
+        throw new Error('unexpected ACL invocation');
       });
       guard.protectDirectory(caDir);
 
@@ -383,8 +384,9 @@ describe('create command', () => {
       const guard = createWindowsFsGuard((command, argv) => {
         if (command === 'whoami') return '"USER","S-1-5-21-1-2-3"';
         if (argv.includes('/inheritance:r')) return '';
-        const path = argv[0];
-        if (!path) throw new Error('unexpected icacls invocation');
+        const match = /-LiteralPath '((?:[^']|'')*)'/.exec(argv[4] ?? '');
+        const path = match?.[1]?.replaceAll("''", "'");
+        if (!path) throw new Error('unexpected ACL invocation');
         let bytes = -1;
         try {
           bytes = readFileSync(path).byteLength;
@@ -393,7 +395,7 @@ describe('create command', () => {
         }
         calls.push({ path, bytes });
         if (path.startsWith(outputDir)) throw new Error('unprotected probe');
-        return `${path} USER:(F)`;
+        return 'O:S-1-5-21-1-2-3G:S-1-5-21-1-2-3D:AI(A;OICI;FA;;;S-1-5-21-1-2-3)';
       });
       guard.protectDirectory(caDir);
 
