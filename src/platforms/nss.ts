@@ -81,8 +81,13 @@ function writeFailure(message: string): CertkitError {
   return new CertkitError('STORE_WRITE_FAILED', message);
 }
 
+// resolve() alone misses the literal path on Windows (drive-letter prefix).
+export function isSystemNssDb(target: string): boolean {
+  return target === SYSTEM_NSS_DB || resolve(target) === SYSTEM_NSS_DB;
+}
+
 function assertWritableTarget(target: string): void {
-  if (resolve(target) === SYSTEM_NSS_DB)
+  if (isSystemNssDb(target))
     throw writeFailure(
       'Automatic writes to /etc/pki/nssdb are disabled; use the documented manual trust instructions.',
     );

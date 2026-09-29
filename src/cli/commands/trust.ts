@@ -1,6 +1,6 @@
 import { X509Certificate } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import type { FsGuard, StateFile } from '../../core/cadir.js';
 import { caDir } from '../../core/certificate.js';
 import { CertkitError, type ErrorCode } from '../../core/errors.js';
@@ -22,6 +22,7 @@ import {
 } from '../../platforms/macos.js';
 import {
   createNssAdapter,
+  isSystemNssDb,
   nssCertificateNickname,
 } from '../../platforms/nss.js';
 import { run } from '../../platforms/run.js';
@@ -137,7 +138,7 @@ export function adapterTargets(
           ? (store.installTargets ?? [])
           : (store.targets ?? []);
       for (const target of values)
-        if (resolve(target) !== '/etc/pki/nssdb')
+        if (!isSystemNssDb(target))
           targets.push({ store: store.store, target });
     } else if (store.store === 'linux-system' && store.detected) {
       const mechanism = store.detail;
