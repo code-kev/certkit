@@ -39,7 +39,6 @@
     "deps:check": "node scripts/check-deps.mjs"
   },
   "dependencies": {
-    "@expo/sudo-prompt": "9.3.2",
     "@peculiar/x509": "2.1.0",
     "citty": "0.2.2",
     "picocolors": "1.1.1",

@@ -54,7 +54,9 @@ function identity(runCommand: CommandRunner): { account: string; sid: string } {
 // ACL reads use Get-Acl's SDDL form: it is ASCII (SIDs), unlike icacls text
 // output, which is emitted in the console OEM codepage and corrupts
 // non-ASCII account names/paths when piped.
-// Get-Acl .Sddl substitutes two-letter aliases for well-known SIDs.
+// Get-Acl .Sddl substitutes two-letter aliases for well-known SIDs. The map
+// covers the principals that realistically appear on a private directory;
+// rarer aliases (CO, DA, ...) fail closed with a manual icacls hint.
 const SDDL_ALIASES: Record<string, string> = {
   AN: 'S-1-5-7', // Anonymous
   AU: 'S-1-5-11', // Authenticated Users

@@ -1,5 +1,4 @@
 import { spawn } from 'node:child_process';
-import { exec } from '@expo/sudo-prompt';
 import { CertkitError } from '../core/errors.js';
 
 export function shQuote(value: string): string {
@@ -20,38 +19,30 @@ export function elevate(argv: string[]): Promise<void> {
     );
 
   const command = argv.map(shQuote).join(' ');
-  // Linux elevation goes through plain sudo on the inherited terminal: pkexec
-  // (sudo-prompt's Linux path) needs a GUI polkit agent, which headless
-  // servers and SSH sessions do not have. Non-TTY sudo fails fast and the
-  // manual command is the documented fallback.
-  if (process.platform === 'linux')
-    return new Promise((resolve, reject) => {
-      const child = spawn('sudo', argv, { stdio: 'inherit' });
-      child.on('error', () =>
-        reject(
-          new CertkitError(
-            'STORE_WRITE_FAILED',
-            `sudo is unavailable. Run it manually with sudo: ${command}`,
-          ),
-        ),
-      );
-      child.on('exit', (code) => {
-        if (code === 0) {
-          resolve();
-          return;
-        }
-        reject(
-          new CertkitError(
-            'STORE_WRITE_FAILED',
-            `The elevated command failed or was cancelled. Run it manually with sudo: ${command}`,
-          ),
-        );
-      });
-    });
+  // Only Linux elevates (its system store is root-owned; macOS trust is
+  // user-domain and Windows has no elevated trust command). Plain sudo on the
+  // inherited terminal: pkexec needs a GUI polkit agent that headless servers
+  // and SSH sessions lack; non-TTY sudo fails fast with the manual command.
+  if (process.platform !== 'linux')
+    return Promise.reject(
+      new CertkitError(
+        'UNSUPPORTED_PLATFORM',
+        `Certkit has no elevated trust-store command on ${process.platform}.`,
+      ),
+    );
 
   return new Promise((resolve, reject) => {
-    exec(command, { name: 'Certkit' }, (error) => {
-      if (!error) {
+    const child = spawn('sudo', argv, { stdio: 'inherit' });
+    child.on('error', () =>
+      reject(
+        new CertkitError(
+          'STORE_WRITE_FAILED',
+          `sudo is unavailable. Run it manually with sudo: ${command}`,
+        ),
+      ),
+    );
+    child.on('exit', (code) => {
+      if (code === 0) {
         resolve();
         return;
       }

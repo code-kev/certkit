@@ -212,8 +212,13 @@ export function createLinuxAdapter(
     for (const argv of commands) {
       try {
         await dependencies.elevate(argv);
-      } catch {
-        throw writeFailure(message);
+      } catch (error) {
+        // Keep the elevate layer's manual-command guidance visible.
+        throw writeFailure(
+          error instanceof CertkitError
+            ? `${message} ${error.message}`
+            : message,
+        );
       }
     }
   };
