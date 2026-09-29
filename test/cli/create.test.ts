@@ -9,18 +9,28 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { writeCertificateFiles } from '../../src/cli/commands/create.js';
+import type { FsGuard } from '../../src/core/cadir.js';
+import { CertkitError } from '../../src/core/errors.js';
 import { createWindowsFsGuard } from '../../src/platforms/fsguard.js';
 import { run } from '../../src/platforms/run.js';
 
 const cli = resolve('dist/cli/index.js');
 const originalCaDir = process.env.CERTKIT_HOME;
 const roots: string[] = [];
+
+// Placement-preflight tests only need the guard surface, not real ACLs.
+const noopGuard: FsGuard = {
+  protectDirectory() {},
+  assertProtectedDirectory() {},
+  assertProtectedFile() {},
+};
 
 function fixture(): string {
   const root = mkdtempSync(join(tmpdir(), 'certkit-create-'));
@@ -442,5 +452,391 @@ describe('create command', () => {
     if (report.stores.some((store) => store.state === 'untrusted'))
       expect(result.stderr).toContain('CA not trusted — run `certkit install`');
     expect(result.stdout).not.toContain('CA not trusted');
+  });
+
+  it('requires an fsGuard before Windows key placement', () => {
+    const root = fixture();
+    const outputDir = join(root, 'out');
+    const caDir = join(root, 'ca');
+    mkdirSync(outputDir);
+    mkdirSync(caDir, { mode: 0o700 });
+
+    expect(() =>
+      writeCertificateFiles(
+        {
+          cert: join(outputDir, 'localhost.pem'),
+          key: join(outputDir, 'localhost-key.pem'),
+        },
+        { cert: 'certificate', key: 'private key' },
+        { force: false, caDir, platform: 'win32' },
+      ),
+    ).toThrow('requires filesystem protection checks');
+
+    expect(readdirSync(outputDir)).toEqual([]);
+    expect(readdirSync(caDir)).toEqual([]);
+  });
+
+  it('fails Windows placement preflight when the CA directory cannot be inspected', () => {
+    const root = fixture();
+    const outputDir = join(root, 'out');
+    mkdirSync(outputDir);
+
+    expect(() =>
+      writeCertificateFiles(
+        {
+          cert: join(outputDir, 'localhost.pem'),
+          key: join(outputDir, 'localhost-key.pem'),
+        },
+        { cert: 'certificate', key: 'private key' },
+        {
+          force: false,
+          caDir: join(root, 'missing-ca'),
+          fsGuard: noopGuard,
+          platform: 'win32',
+        },
+      ),
+    ).toThrow('Cannot preserve the protected Windows key ACL');
+
+    expect(readdirSync(outputDir)).toEqual([]);
+  });
+
+  it('fails Windows preflight closed when the placed probe vanishes after rename', () => {
+    const root = fixture();
+    const outputDir = join(root, 'out');
+    const caDir = join(root, 'ca');
+    mkdirSync(outputDir);
+    mkdirSync(caDir, { mode: 0o700 });
+
+    expect(() =>
+      writeCertificateFiles(
+        {
+          cert: join(outputDir, 'localhost.pem'),
+          key: join(outputDir, 'localhost-key.pem'),
+        },
+        { cert: 'certificate', key: 'private key' },
+        {
+          force: true,
+          caDir,
+          fsGuard: noopGuard,
+          platform: 'win32',
+          rename(from, to) {
+            renameSync(from, to);
+            unlinkSync(to);
+          },
+        },
+      ),
+    ).toThrow('Could not verify protected Windows key placement');
+
+    expect(readdirSync(outputDir)).toEqual([]);
+    expect(readdirSync(caDir)).toEqual([]);
+  });
+
+  it('fails Windows preflight closed when the placed probe is replaced by a directory', () => {
+    const root = fixture();
+    const outputDir = join(root, 'out');
+    const caDir = join(root, 'ca');
+    mkdirSync(outputDir);
+    mkdirSync(caDir, { mode: 0o700 });
+
+    expect(() =>
+      writeCertificateFiles(
+        {
+          cert: join(outputDir, 'localhost.pem'),
+          key: join(outputDir, 'localhost-key.pem'),
+        },
+        { cert: 'certificate', key: 'private key' },
+        {
+          force: true,
+          caDir,
+          fsGuard: noopGuard,
+          platform: 'win32',
+          rename(from, to) {
+            renameSync(from, to);
+            unlinkSync(to);
+            mkdirSync(to);
+          },
+        },
+      ),
+    ).toThrow('Could not verify protected Windows key placement');
+
+    const leftovers = readdirSync(outputDir);
+    expect(leftovers).toHaveLength(1);
+    expect(lstatSync(join(outputDir, leftovers[0] ?? '')).isDirectory()).toBe(
+      true,
+    );
+    expect(readdirSync(caDir)).toEqual([]);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'fails Windows preflight closed when the placed probe is replaced by a symlink',
+    () => {
+      const root = fixture();
+      const outputDir = join(root, 'out');
+      const caDir = join(root, 'ca');
+      mkdirSync(outputDir);
+      mkdirSync(caDir, { mode: 0o700 });
+
+      expect(() =>
+        writeCertificateFiles(
+          {
+            cert: join(outputDir, 'localhost.pem'),
+            key: join(outputDir, 'localhost-key.pem'),
+          },
+          { cert: 'certificate', key: 'private key' },
+          {
+            force: true,
+            caDir,
+            fsGuard: noopGuard,
+            platform: 'win32',
+            rename(from, to) {
+              renameSync(from, to);
+              unlinkSync(to);
+              symlinkSync(from, to);
+            },
+          },
+        ),
+      ).toThrow('Could not verify protected Windows key placement');
+
+      expect(readdirSync(outputDir)).toEqual([]);
+      expect(readdirSync(caDir)).toEqual([]);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'rejects a private-key temp file whose mode was narrowed by the umask',
+    () => {
+      const root = fixture();
+      const outputDir = join(root, 'out');
+      const caDir = join(root, 'ca');
+      mkdirSync(outputDir);
+      mkdirSync(caDir, { mode: 0o700 });
+      const previousUmask = process.umask(0o777);
+
+      try {
+        expect(() =>
+          writeCertificateFiles(
+            {
+              cert: join(outputDir, 'localhost.pem'),
+              key: join(outputDir, 'localhost-key.pem'),
+            },
+            { cert: 'certificate', key: 'private key' },
+            { force: false, caDir },
+          ),
+        ).toThrow('not protected with mode 0600');
+      } finally {
+        process.umask(previousUmask);
+      }
+
+      expect(readdirSync(outputDir)).toEqual([]);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'skips the private-key ownership check when getuid is unavailable',
+    () => {
+      const root = fixture();
+      const outputDir = join(root, 'out');
+      const caDir = join(root, 'ca');
+      mkdirSync(outputDir);
+      mkdirSync(caDir, { mode: 0o700 });
+      const paths = {
+        cert: join(outputDir, 'localhost.pem'),
+        key: join(outputDir, 'localhost-key.pem'),
+      };
+      const getuid = process.getuid;
+      if (!getuid) return;
+      delete (process as { getuid?: typeof getuid }).getuid;
+
+      try {
+        writeCertificateFiles(
+          paths,
+          { cert: 'certificate', key: 'private key' },
+          { force: false, caDir },
+        );
+      } finally {
+        process.getuid = getuid;
+      }
+
+      expect(readFileSync(paths.key, 'utf8')).toBe('private key');
+      expect(statSync(paths.key).mode & 0o777).toBe(0o600);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'wraps a guard rejection during private-key staging',
+    () => {
+      const root = fixture();
+      const outputDir = join(root, 'out');
+      const caDir = join(root, 'ca');
+      mkdirSync(outputDir);
+      mkdirSync(caDir, { mode: 0o700 });
+      const guard: FsGuard = {
+        protectDirectory() {},
+        assertProtectedDirectory() {},
+        assertProtectedFile() {
+          throw new Error('guard boom');
+        },
+      };
+
+      expect(() =>
+        writeCertificateFiles(
+          {
+            cert: join(outputDir, 'localhost.pem'),
+            key: join(outputDir, 'localhost-key.pem'),
+          },
+          { cert: 'certificate', key: 'private key' },
+          { force: false, caDir, fsGuard: guard },
+        ),
+      ).toThrow('Could not stage private-key output');
+
+      expect(readdirSync(outputDir)).toEqual([]);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'reports a leftover key temp file when cleanup fails after a publish error',
+    () => {
+      const root = fixture();
+      const outputDir = join(root, 'out');
+      const caDir = join(root, 'ca');
+      mkdirSync(outputDir);
+      mkdirSync(caDir, { mode: 0o700 });
+      const paths = {
+        cert: join(outputDir, 'localhost.pem'),
+        key: join(outputDir, 'localhost-key.pem'),
+      };
+      const keyTemp = join(outputDir, '.leaf-key-key-temp.tmp');
+      const ids = ['cert-temp', 'key-temp'];
+
+      expect(() =>
+        writeCertificateFiles(
+          paths,
+          { cert: 'certificate', key: 'private key' },
+          {
+            force: true,
+            caDir,
+            randomUUID: () => ids.shift() ?? 'unexpected',
+            rename(from, to) {
+              renameSync(from, to);
+              if (to === paths.key) {
+                mkdirSync(from);
+                throw new Error('post-rename failure');
+              }
+            },
+          },
+        ),
+      ).toThrow(`Temporary file may remain at ${keyTemp}`);
+
+      expect(readFileSync(paths.key, 'utf8')).toBe('private key');
+      expect(lstatSync(keyTemp).isDirectory()).toBe(true);
+      expect(existsSync(paths.cert)).toBe(false);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'treats an already-moved key temp file as cleaned after a publish error',
+    () => {
+      const root = fixture();
+      const outputDir = join(root, 'out');
+      const caDir = join(root, 'ca');
+      mkdirSync(outputDir);
+      mkdirSync(caDir, { mode: 0o700 });
+      const paths = {
+        cert: join(outputDir, 'localhost.pem'),
+        key: join(outputDir, 'localhost-key.pem'),
+      };
+
+      expect(() =>
+        writeCertificateFiles(
+          paths,
+          { cert: 'certificate', key: 'private key' },
+          {
+            force: true,
+            caDir,
+            rename(from, to) {
+              renameSync(from, to);
+              if (to === paths.key) throw new Error('post-rename failure');
+            },
+          },
+        ),
+      ).toThrow(
+        'Could not write certificate outputs; neither output was replaced. post-rename failure',
+      );
+
+      expect(readFileSync(paths.key, 'utf8')).toBe('private key');
+      expect(readdirSync(outputDir)).toEqual(['localhost-key.pem']);
+    },
+  );
+
+  it('reports a publish collision past the pre-check with neither output replaced', () => {
+    const root = fixture();
+    const outputDir = join(root, 'out');
+    const caDir = join(root, 'ca');
+    mkdirSync(outputDir);
+    mkdirSync(caDir, { mode: 0o700 });
+    const paths = {
+      cert: join(outputDir, 'localhost.pem'),
+      key: join(outputDir, 'localhost-key.pem'),
+    };
+    const guard: FsGuard = {
+      protectDirectory() {},
+      assertProtectedDirectory() {},
+      assertProtectedFile(path) {
+        // Simulate a racer creating the key output after the pre-check.
+        if (path.endsWith('.tmp')) writeFileSync(paths.key, 'racing bytes');
+      },
+    };
+
+    expect(() =>
+      writeCertificateFiles(
+        paths,
+        { cert: 'certificate', key: 'private key' },
+        { force: false, caDir, fsGuard: guard },
+      ),
+    ).toThrow(
+      'Could not write certificate outputs; neither output was replaced.',
+    );
+
+    expect(readFileSync(paths.key, 'utf8')).toBe('racing bytes');
+    expect(existsSync(paths.cert)).toBe(false);
+  });
+
+  it('reports a non-Error publish failure without appending a detail', () => {
+    const root = fixture();
+    const outputDir = join(root, 'out');
+    const caDir = join(root, 'ca');
+    mkdirSync(outputDir);
+    mkdirSync(caDir, { mode: 0o700 });
+    const paths = {
+      cert: join(outputDir, 'localhost.pem'),
+      key: join(outputDir, 'localhost-key.pem'),
+    };
+    let caught: unknown;
+
+    try {
+      writeCertificateFiles(
+        paths,
+        { cert: 'certificate', key: 'private key' },
+        {
+          force: true,
+          caDir,
+          // Windows placement preflight requires a guard.
+          ...(process.platform === 'win32' ? { fsGuard: noopGuard } : {}),
+          rename(from, to) {
+            if (to === paths.key) throw 'string failure';
+            renameSync(from, to);
+          },
+        },
+      );
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(CertkitError);
+    expect((caught as CertkitError).message).toBe(
+      'Could not write certificate outputs; neither output was replaced.',
+    );
+    expect(existsSync(paths.cert)).toBe(false);
+    expect(existsSync(paths.key)).toBe(false);
   });
 });

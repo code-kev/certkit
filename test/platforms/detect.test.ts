@@ -245,4 +245,37 @@ describe('environment detection', () => {
     expect(nss(result)?.targets).toContain(target);
     expect(nss(result)?.installTargets).not.toContain(target);
   });
+
+  it('skips Firefox profiles that have no NSS database', async () => {
+    const base = path.join(home, '.mozilla', 'firefox');
+    const result = await detector({
+      files: {
+        [path.join(base, 'profiles.ini')]:
+          '[Profile0]\nIsRelative=1\nPath=empty.default\n',
+      },
+    }).detect();
+    expect(nss(result)?.targets).toEqual([]);
+    expect(nss(result)?.detected).toBe(false);
+  });
+
+  it('uses the real fs, which, and os-release probes by default on Linux', async () => {
+    const result = await detect({ platform: 'linux' });
+    expect(result.os).toBe('linux');
+    expect(result.wsl).toBe(false);
+    expect(result.stores.some((store) => store.store === 'linux-system')).toBe(
+      true,
+    );
+    expect(result.stores.some((store) => store.store === 'nss')).toBe(true);
+  });
+
+  it('detects the current platform with no probes at all', async () => {
+    const result = await detect();
+    const expected =
+      process.platform === 'darwin'
+        ? 'macos'
+        : process.platform === 'win32'
+          ? 'windows'
+          : 'linux';
+    expect(result.os).toBe(expected);
+  });
 });

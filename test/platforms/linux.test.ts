@@ -376,4 +376,478 @@ describe('Linux system trust adapter', () => {
       ['trust', 'list', '--filter=ca-anchors', '--format=pem'],
     ]);
   });
+
+  it('resolves the mechanism from the target when none is recorded', async () => {
+    const { caCertPath, ca, adapter } = await fixture();
+    const target = linuxAnchorTarget(caCertPath, 'update-ca-trust');
+
+    await expect(adapter.inspectInstalled(ca, target)).resolves.toBe('absent');
+    await expect(adapter.install(caCertPath, target)).resolves.toEqual({
+      state: 'verified',
+    });
+    await expect(adapter.inspectInstalled(ca, target)).resolves.toBe('present');
+    await expect(adapter.uninstall(ca, target)).resolves.toBeUndefined();
+
+    const otherTarget = linuxAnchorTarget(caCertPath, 'update-ca-certificates');
+    await expect(
+      adapter.inspectInstalled(ca, otherTarget, 'update-ca-trust'),
+    ).resolves.toBe('inconclusive');
+    await expect(
+      adapter.inspectInstalled(ca, target, 'not-a-mechanism'),
+    ).resolves.toBe('inconclusive');
+    await expect(
+      adapter.inspectInstalled(
+        ca,
+        '/etc/pki/ca-trust/source/anchors/other.pem',
+      ),
+    ).resolves.toBe('inconclusive');
+  });
+
+  it('inspects trust-anchor installs through the active store', async () => {
+    const { caCertPath, ca, adapter } = await fixture();
+    const target = linuxAnchorTarget(caCertPath, 'trust-anchor');
+
+    await expect(
+      adapter.inspectInstalled(ca, target, 'trust-anchor'),
+    ).resolves.toBe('absent');
+    await adapter.install(caCertPath, target, 'trust-anchor');
+    await expect(
+      adapter.inspectInstalled(ca, target, 'trust-anchor'),
+    ).resolves.toBe('present');
+
+    const failing = createLinuxAdapter({
+      caCertPath,
+      run: async () => result('', 1),
+    });
+    await expect(
+      failing.inspectInstalled(ca, target, 'trust-anchor'),
+    ).resolves.toBe('inconclusive');
+  });
+
+  it('treats non-file or unreadable anchors as inconclusive', async () => {
+    const { caCertPath, ca, files } = await fixture();
+    const target = linuxAnchorTarget(caCertPath, 'update-ca-trust');
+    const denied = Object.assign(new Error('EACCES: permission denied'), {
+      code: 'EACCES',
+    });
+    const cases: Array<
+      NonNullable<Parameters<typeof createLinuxAdapter>[0]['fs']>['lstat']
+    > = [
+      async () => ({ isFile: () => false, isSymbolicLink: () => true }),
+      async () => ({ isFile: () => false, isSymbolicLink: () => false }),
+      async () => {
+        throw denied;
+      },
+    ];
+    for (const riggedLstat of cases) {
+      const rigged = createLinuxAdapter({
+        caCertPath,
+        run: async () => result(),
+        fs: { ...fixtureFs(files, caCertPath), lstat: riggedLstat },
+      });
+      await expect(
+        rigged.inspectInstalled(ca, target, 'update-ca-trust'),
+      ).resolves.toBe('inconclusive');
+    }
+    const unreadable = createLinuxAdapter({
+      caCertPath,
+      run: async () => result(),
+      fs: {
+        lstat: async () => ({
+          isFile: () => true,
+          isSymbolicLink: () => false,
+        }),
+        readFile: async () => {
+          throw denied;
+        },
+      },
+    });
+    await expect(
+      unreadable.inspectInstalled(ca, target, 'update-ca-trust'),
+    ).resolves.toBe('inconclusive');
+  });
+
+  it('reports anchors with unparseable contents as different', async () => {
+    const { caCertPath, ca, files, adapter } = await fixture();
+    const target = linuxAnchorTarget(caCertPath, 'update-ca-trust');
+
+    files.set(target, 'not a certificate');
+    await expect(
+      adapter.inspectInstalled(ca, target, 'update-ca-trust'),
+    ).resolves.toBe('absent');
+    files.set(
+      target,
+      '-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----',
+    );
+    await expect(
+      adapter.inspectInstalled(ca, target, 'update-ca-trust'),
+    ).resolves.toBe('absent');
+  });
+
+  it('returns inconclusive when the anchor or CA PEM cannot be parsed', async () => {
+    const { caCertPath, ca, files, adapter } = await fixture();
+    const target = linuxAnchorTarget(caCertPath, 'update-ca-trust');
+    files.set(target, ca);
+
+    await expect(
+      adapter.inspectInstalled('not a pem', target, 'update-ca-trust'),
+    ).resolves.toBe('inconclusive');
+
+    const temporary = linuxAnchorTempTarget(target);
+    files.delete(target);
+    const symlinkedTemporary = createLinuxAdapter({
+      caCertPath,
+      run: async () => result(),
+      fs: {
+        ...fixtureFs(files, caCertPath),
+        async lstat(path) {
+          if (path === temporary)
+            return { isFile: () => false, isSymbolicLink: () => true };
+          if (files.has(path))
+            return { isFile: () => true, isSymbolicLink: () => false };
+          if (path === caCertPath) return lstat(path);
+          throw missingError(path);
+        },
+      },
+    });
+    await expect(
+      symlinkedTemporary.inspectInstalled(ca, target, 'update-ca-trust'),
+    ).resolves.toBe('inconclusive');
+  });
+
+  it('reports not-detected without a detected linux-system store', async () => {
+    const { ca, adapter } = await fixture();
+    const expected = [{ state: 'not-detected', target: 'default' }];
+    await expect(
+      adapter.checkTrust(ca, { os: 'macos', wsl: false, stores: [] }),
+    ).resolves.toEqual(expected);
+    await expect(
+      adapter.checkTrust(ca, { os: 'linux', wsl: false, stores: [] }),
+    ).resolves.toEqual(expected);
+    await expect(
+      adapter.checkTrust(ca, {
+        os: 'linux',
+        wsl: false,
+        stores: [{ store: 'linux-system', detected: false }],
+      }),
+    ).resolves.toEqual(expected);
+  });
+
+  it('reports unknown for unsupported mechanisms and uninspectable stores', async () => {
+    const { ca, files, adapter } = await fixture();
+
+    await expect(
+      adapter.checkTrust(ca, {
+        os: 'linux',
+        wsl: false,
+        stores: [{ store: 'linux-system', detected: true, detail: 'bogus' }],
+      }),
+    ).resolves.toEqual([
+      {
+        state: 'unknown',
+        target: 'default',
+        detail: 'The detected Linux trust mechanism is unsupported.',
+      },
+    ]);
+
+    files.set(linuxActiveStorePath('update-ca-certificates'), ca);
+    await expect(
+      adapter.checkTrust(ca, {
+        os: 'linux',
+        wsl: false,
+        stores: [
+          {
+            store: 'linux-system',
+            detected: true,
+            detail: 'update-ca-certificates',
+            targets: ['/custom/target'],
+          },
+        ],
+      }),
+    ).resolves.toEqual([{ state: 'trusted', target: '/custom/target' }]);
+
+    files.set(linuxActiveStorePath('update-ca-certificates'), 'garbage');
+    await expect(
+      adapter.checkTrust(ca, environment('update-ca-certificates')),
+    ).resolves.toMatchObject([{ state: 'unknown' }]);
+
+    files.set(linuxActiveStorePath('update-ca-certificates'), ca);
+    await expect(
+      adapter.checkTrust('not a pem', environment('update-ca-certificates')),
+    ).resolves.toMatchObject([{ state: 'unknown' }]);
+  });
+
+  it('rejects installs to unrecognized targets', async () => {
+    const { caCertPath, adapter } = await fixture();
+    const target = linuxAnchorTarget(caCertPath, 'update-ca-trust');
+
+    await expect(
+      adapter.install(caCertPath, '/etc/ssl/certs/other.pem'),
+    ).rejects.toMatchObject({
+      code: 'STORE_WRITE_FAILED',
+      message: expect.stringContaining('not recognized'),
+    });
+    await expect(
+      adapter.install(caCertPath, target, 'not-a-mechanism'),
+    ).rejects.toMatchObject({ code: 'STORE_WRITE_FAILED' });
+    await expect(
+      adapter.uninstall('unused', '/etc/ssl/certs/other.pem'),
+    ).rejects.toMatchObject({
+      code: 'STORE_WRITE_FAILED',
+      message: expect.stringContaining('not recognized'),
+    });
+  });
+
+  it('preserves a different or uninspectable anchor on install', async () => {
+    const { caCertPath, other, files, adapter } = await fixture();
+    const target = linuxAnchorTarget(caCertPath, 'update-ca-trust');
+
+    files.set(target, other);
+    await expect(
+      adapter.install(caCertPath, target, 'update-ca-trust'),
+    ).rejects.toMatchObject({
+      code: 'STORE_WRITE_FAILED',
+      message: expect.stringContaining(target),
+    });
+    expect(files.get(target)).toBe(other);
+
+    const inconclusive = createLinuxAdapter({
+      caCertPath,
+      run: async () => result(),
+      elevate: async () => {},
+      fs: {
+        ...fixtureFs(files, caCertPath),
+        lstat: async () => ({
+          isFile: () => false,
+          isSymbolicLink: () => true,
+        }),
+      },
+    });
+    await expect(
+      inconclusive.install(caCertPath, target, 'update-ca-trust'),
+    ).rejects.toMatchObject({
+      code: 'STORE_WRITE_FAILED',
+      message: expect.stringContaining('could not be inspected'),
+    });
+  });
+
+  it('preflights the temporary anchor on install', async () => {
+    const { caCertPath, other, files, adapter } = await fixture();
+    const target = linuxAnchorTarget(caCertPath, 'update-ca-trust');
+    const temporary = linuxAnchorTempTarget(target);
+
+    files.set(temporary, other);
+    await expect(
+      adapter.install(caCertPath, target, 'update-ca-trust'),
+    ).rejects.toMatchObject({
+      code: 'STORE_WRITE_FAILED',
+      message: expect.stringContaining('temporary Linux anchor'),
+    });
+    expect(files.get(temporary)).toBe(other);
+
+    files.delete(temporary);
+    const inconclusive = createLinuxAdapter({
+      caCertPath,
+      run: async () => result(),
+      elevate: async () => {},
+      fs: {
+        ...fixtureFs(files, caCertPath),
+        async lstat(path) {
+          if (path === temporary)
+            return { isFile: () => false, isSymbolicLink: () => true };
+          if (files.has(path))
+            return { isFile: () => true, isSymbolicLink: () => false };
+          if (path === caCertPath) return lstat(path);
+          throw missingError(path);
+        },
+      },
+    });
+    await expect(
+      inconclusive.install(caCertPath, target, 'update-ca-trust'),
+    ).rejects.toMatchObject({
+      code: 'STORE_WRITE_FAILED',
+      message: expect.stringContaining(
+        'temporary Linux anchor target could not be inspected',
+      ),
+    });
+  });
+
+  it('fails without an elevate hook when the anchor must be written', async () => {
+    const { caCertPath, files } = await fixture();
+    const target = linuxAnchorTarget(caCertPath, 'update-ca-trust');
+    const noElevate = createLinuxAdapter({
+      caCertPath,
+      run: async () => result(),
+      fs: fixtureFs(files, caCertPath),
+    });
+
+    await expect(
+      noElevate.install(caCertPath, target, 'update-ca-trust'),
+    ).rejects.toMatchObject({
+      code: 'STORE_WRITE_FAILED',
+      message: expect.stringContaining('rerun `certkit install`'),
+    });
+  });
+
+  it('only rebuilds when the anchor is already present', async () => {
+    const { caCertPath, ca, files, commands, adapter } = await fixture();
+    const target = linuxAnchorTarget(caCertPath, 'update-ca-trust');
+    files.set(target, ca);
+
+    await expect(
+      adapter.install(caCertPath, target, 'update-ca-trust'),
+    ).resolves.toEqual({ state: 'verified' });
+    expect(commands).toEqual([['update-ca-trust', 'extract']]);
+  });
+
+  it('wraps unexpected install failures', async () => {
+    const { caCertPath, files } = await fixture();
+    const target = linuxAnchorTarget(caCertPath, 'update-ca-trust');
+    const broken = createLinuxAdapter({
+      caCertPath,
+      run: async () => result(),
+      elevate: async () => {},
+      fs: {
+        ...fixtureFs(files, caCertPath),
+        async readFile(path) {
+          if (path === caCertPath) throw new Error('disk gone');
+          const value = files.get(path);
+          if (value !== undefined) return value;
+          throw missingError(path);
+        },
+      },
+    });
+
+    await expect(
+      broken.install(caCertPath, target, 'update-ca-trust'),
+    ).rejects.toMatchObject({
+      code: 'STORE_WRITE_FAILED',
+      message: expect.stringContaining(
+        'Could not verify the Linux system trust install',
+      ),
+    });
+  });
+
+  it('guards trust-anchor removal by fingerprint and store readability', async () => {
+    const { caCertPath, ca, other, adapter } = await fixture();
+    const target = linuxAnchorTarget(caCertPath, 'trust-anchor');
+
+    await expect(
+      adapter.uninstall(other, target, 'trust-anchor'),
+    ).rejects.toMatchObject({
+      code: 'STORE_WRITE_FAILED',
+      message: expect.stringContaining('does not match the CA fingerprint'),
+    });
+
+    const blind = createLinuxAdapter({
+      caCertPath,
+      run: async () => result('', 1),
+      elevate: async () => {},
+    });
+    await expect(
+      blind.uninstall(ca, target, 'trust-anchor'),
+    ).rejects.toMatchObject({
+      code: 'STORE_WRITE_FAILED',
+      message: expect.stringContaining('could not be inspected'),
+    });
+  });
+
+  it('preserves uninspectable anchors on uninstall', async () => {
+    const { caCertPath, ca, files } = await fixture();
+    const target = linuxAnchorTarget(caCertPath, 'update-ca-trust');
+    const temporary = linuxAnchorTempTarget(target);
+    const rigged = (symlinkPath: string) =>
+      createLinuxAdapter({
+        caCertPath,
+        run: async () => result(),
+        elevate: async () => {},
+        fs: {
+          ...fixtureFs(files, caCertPath),
+          async lstat(path) {
+            if (path === symlinkPath)
+              return { isFile: () => false, isSymbolicLink: () => true };
+            if (files.has(path))
+              return { isFile: () => true, isSymbolicLink: () => false };
+            if (path === caCertPath) return lstat(path);
+            throw missingError(path);
+          },
+        },
+      });
+
+    await expect(
+      rigged(target).uninstall(ca, target, 'update-ca-trust'),
+    ).rejects.toMatchObject({
+      code: 'STORE_WRITE_FAILED',
+      message: expect.stringContaining(
+        'Linux anchor target could not be inspected',
+      ),
+    });
+    await expect(
+      rigged(temporary).uninstall(ca, target, 'update-ca-trust'),
+    ).rejects.toMatchObject({
+      code: 'STORE_WRITE_FAILED',
+      message: expect.stringContaining(
+        'temporary Linux anchor target could not be inspected',
+      ),
+    });
+  });
+
+  it('removes a matching temporary anchor on uninstall', async () => {
+    const { caCertPath, ca, files, commands, adapter } = await fixture();
+    const target = linuxAnchorTarget(caCertPath, 'update-ca-trust');
+    const temporary = linuxAnchorTempTarget(target);
+    files.set(temporary, ca);
+
+    await adapter.uninstall(ca, target, 'update-ca-trust');
+
+    expect(commands).toEqual([
+      ['rm', '--', temporary],
+      ['update-ca-trust', 'extract'],
+    ]);
+    expect(files.has(temporary)).toBe(false);
+  });
+
+  it('fails closed when removal cannot be verified', async () => {
+    const { caCertPath, ca, files, commands } = await fixture();
+    const target = linuxAnchorTarget(caCertPath, 'update-ca-trust');
+    const lingering = createLinuxAdapter({
+      caCertPath,
+      run: async () => result(),
+      async elevate(argv) {
+        commands.push(argv);
+      },
+      fs: fixtureFs(files, caCertPath),
+    });
+
+    files.set(linuxActiveStorePath('update-ca-trust'), ca);
+    await expect(
+      lingering.uninstall(ca, target, 'update-ca-trust'),
+    ).rejects.toMatchObject({
+      code: 'STORE_WRITE_FAILED',
+      message: expect.stringContaining(
+        'remains in the active Linux trust store',
+      ),
+    });
+
+    files.delete(linuxActiveStorePath('update-ca-trust'));
+    await expect(
+      lingering.uninstall(ca, target, 'update-ca-trust'),
+    ).rejects.toMatchObject({
+      code: 'STORE_WRITE_FAILED',
+      message: expect.stringContaining('could not be read after removal'),
+    });
+  });
+
+  it('wraps unexpected uninstall failures', async () => {
+    const { caCertPath, ca, files, adapter } = await fixture();
+    const target = linuxAnchorTarget(caCertPath, 'update-ca-trust');
+    files.set(target, ca);
+
+    await expect(
+      adapter.uninstall('not a pem', target, 'update-ca-trust'),
+    ).rejects.toMatchObject({
+      code: 'STORE_WRITE_FAILED',
+      message: expect.stringContaining('Could not complete Linux CA removal'),
+    });
+  });
 });

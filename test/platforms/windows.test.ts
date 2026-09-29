@@ -125,7 +125,7 @@ describe('Windows Root store adapter', () => {
     const calls: string[][] = [];
     const instance = adapter(caCertPath, async (argv) => {
       calls.push(argv);
-      return argv[1] === '-addstore'
+      return argv.includes('-addstore')
         ? result('Certificate added to store.')
         : result(
             `================ Certificate ================\r\nCert Hash(sha1): ${sha1(ca)}\r\nCertUtil: -store command completed successfully.`,
@@ -166,7 +166,7 @@ describe('Windows Root store adapter', () => {
     const calls: string[][] = [];
     const instance = adapter(caCertPath, async (argv) => {
       calls.push(argv);
-      return argv[1] === '-addstore'
+      return argv.includes('-addstore')
         ? result()
         : result(`Cert Hash(sha1): ${sha1(other)}`);
     });
@@ -237,6 +237,175 @@ describe('Windows Root store adapter', () => {
         stores: [{ store: 'windows-root', detected: false }],
       }),
     ).resolves.toEqual([{ state: 'not-detected', target: 'default' }]);
+    await expect(
+      instance.checkTrust('unused', { os: 'linux', wsl: false, stores: [] }),
+    ).resolves.toEqual([{ state: 'not-detected', target: 'default' }]);
     expect(calls).toBe(0);
+  });
+
+  it('rejects non-default targets before running commands', async () => {
+    const { ca } = await certificates();
+    const { caCertPath } = await fixture(ca);
+    let calls = 0;
+    const instance = adapter(caCertPath, async () => {
+      calls += 1;
+      return result();
+    });
+
+    await expect(instance.inspectInstalled(ca, 'other')).rejects.toMatchObject({
+      code: 'STORE_WRITE_FAILED',
+      message: expect.stringContaining('only supports target "default"'),
+    });
+    await expect(instance.install(caCertPath, 'other')).rejects.toMatchObject({
+      code: 'STORE_WRITE_FAILED',
+    });
+    await expect(instance.uninstall(ca, 'other')).rejects.toMatchObject({
+      code: 'STORE_WRITE_FAILED',
+    });
+    expect(calls).toBe(0);
+  });
+
+  it('ignores blank lines in store enumeration output', async () => {
+    const { ca, other } = await certificates();
+    const { caCertPath } = await fixture(ca);
+    const instance = adapter(caCertPath, async () =>
+      result(`\r\n${storeOutput(other)}\r\n\r\n${storeOutput(ca)}\r\n`),
+    );
+
+    await expect(instance.checkTrust(ca, environment)).resolves.toEqual([
+      { state: 'trusted', target: 'default' },
+    ]);
+  });
+
+  it('treats base64-looking non-certificate output as uninspectable', async () => {
+    const { ca } = await certificates();
+    const { caCertPath } = await fixture(ca);
+    const instance = adapter(caCertPath, async () => result('AAAA'));
+
+    await expect(instance.checkTrust(ca, environment)).resolves.toMatchObject([
+      { state: 'unknown', target: 'default' },
+    ]);
+    await expect(instance.inspectInstalled(ca, 'default')).resolves.toBe(
+      'inconclusive',
+    );
+  });
+
+  it('reports inspect and check failures when enumeration throws', async () => {
+    const { ca } = await certificates();
+    const { caCertPath } = await fixture(ca);
+    const failed = adapter(caCertPath, async () => result('', 1));
+    await expect(failed.inspectInstalled(ca, 'default')).resolves.toBe(
+      'inconclusive',
+    );
+
+    const throwing = adapter(caCertPath, async () => {
+      throw new Error('powershell missing');
+    });
+    await expect(throwing.inspectInstalled(ca, 'default')).resolves.toBe(
+      'inconclusive',
+    );
+    await expect(throwing.checkTrust(ca, environment)).resolves.toMatchObject([
+      { state: 'unknown', target: 'default' },
+    ]);
+  });
+
+  it('keeps install inconclusive when the read-back command fails', async () => {
+    const { ca } = await certificates();
+    const { caCertPath } = await fixture(ca);
+    const rejecting = adapter(caCertPath, async (argv) => {
+      if (argv.includes('-addstore'))
+        return result('Certificate added to store.');
+      throw new Error('read-back failed');
+    });
+    await expect(
+      rejecting.install(caCertPath, 'default'),
+    ).resolves.toMatchObject({ state: 'inconclusive' });
+
+    const failing = adapter(caCertPath, async (argv) =>
+      argv.includes('-addstore')
+        ? result('Certificate added to store.')
+        : result('', 1),
+    );
+    await expect(failing.install(caCertPath, 'default')).resolves.toMatchObject(
+      { state: 'inconclusive' },
+    );
+  });
+
+  it('wraps unexpected install errors', async () => {
+    const { ca } = await certificates();
+    const { caCertPath } = await fixture(ca);
+    const instance = adapter(caCertPath, async () => result());
+
+    await expect(
+      instance.install(`${caCertPath}.missing`, 'default'),
+    ).rejects.toMatchObject({
+      code: 'STORE_WRITE_FAILED',
+      message: expect.stringContaining(
+        'Could not verify the current-user Windows Root store install',
+      ),
+    });
+  });
+
+  it('refuses uninstall when the store cannot be inspected', async () => {
+    const { ca } = await certificates();
+    const { caCertPath } = await fixture(ca);
+    const instance = adapter(caCertPath, async () => result('', 1));
+
+    await expect(instance.uninstall(ca, 'default')).rejects.toMatchObject({
+      code: 'STORE_WRITE_FAILED',
+      message: expect.stringContaining('Could not inspect'),
+    });
+  });
+
+  it('retains the CA when deletion fails', async () => {
+    const { ca } = await certificates();
+    const { caCertPath } = await fixture(ca);
+    const calls: string[][] = [];
+    const instance = adapter(caCertPath, async (argv) => {
+      calls.push(argv);
+      return argv[0] === 'powershell.exe'
+        ? result(storeOutput(ca))
+        : result('Access denied', 1);
+    });
+
+    await expect(instance.uninstall(ca, 'default')).rejects.toMatchObject({
+      code: 'STORE_WRITE_FAILED',
+      message: expect.stringContaining('Could not remove'),
+    });
+    expect(calls).toEqual([
+      enumerateArgv,
+      ['certutil', '-user', '-delstore', 'Root', sha1(ca)],
+    ]);
+  });
+
+  it('fails closed when post-removal enumeration fails', async () => {
+    const { ca } = await certificates();
+    const { caCertPath } = await fixture(ca);
+    let enumerations = 0;
+    const instance = adapter(caCertPath, async (argv) => {
+      if (argv[0] === 'powershell.exe') {
+        enumerations += 1;
+        return enumerations === 1 ? result(storeOutput(ca)) : result('', 1);
+      }
+      return result('CertUtil: -delstore command completed successfully.');
+    });
+
+    await expect(instance.uninstall(ca, 'default')).rejects.toMatchObject({
+      code: 'STORE_WRITE_FAILED',
+      message: expect.stringContaining('remains'),
+    });
+  });
+
+  it('wraps unexpected uninstall errors', async () => {
+    const { ca } = await certificates();
+    const { caCertPath } = await fixture(ca);
+    const instance = adapter(caCertPath, async () => {
+      throw new Error('powershell missing');
+    });
+
+    await expect(instance.uninstall(ca, 'default')).rejects.toMatchObject({
+      code: 'STORE_WRITE_FAILED',
+      message: expect.stringContaining('Could not complete Windows CA removal'),
+    });
   });
 });

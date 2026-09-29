@@ -444,4 +444,66 @@ describe('status', () => {
       run,
     });
   });
+
+  it('reports a detected system store as untrusted when no CA exists', async () => {
+    const caDir = join(root, 'missing-ca');
+    detectMacos();
+
+    const report = await status({ caDir });
+
+    expect(report.stores).toContainEqual({
+      store: 'macos-keychain',
+      state: 'untrusted',
+    });
+    expect(createMacosAdapter).not.toHaveBeenCalled();
+  });
+
+  it('handles an NSS store detected without targets', async () => {
+    const caDir = join(root, 'ca');
+    await certificateFor(['localhost'], { caDir });
+    vi.mocked(detect).mockResolvedValue({
+      os: 'linux',
+      wsl: false,
+      stores: [
+        { store: 'macos-keychain', detected: false },
+        { store: 'windows-root', detected: false },
+        { store: 'linux-system', detected: false },
+        { store: 'nss', detected: true },
+      ],
+    });
+
+    const report = await status({ caDir });
+
+    expect(report.stores).toContainEqual({
+      store: 'nss',
+      state: 'not-detected',
+    });
+    expect(mockNssCheckTrust).toHaveBeenCalledOnce();
+  });
+
+  it('refuses to elevate during status', async () => {
+    const caDir = join(root, 'ca');
+    await certificateFor(['localhost'], { caDir });
+    vi.mocked(createMacosAdapter).mockImplementationOnce((options) => ({
+      id: 'macos-keychain',
+      checkTrust: async () => {
+        await options.elevate?.([]);
+        return [];
+      },
+      install: vi.fn(),
+      uninstall: vi.fn(),
+    }));
+
+    await expect(status({ caDir })).rejects.toThrow('status cannot elevate');
+  });
+});
+
+describe('reflect-metadata', () => {
+  it('loads the side-effect module and installs Reflect metadata', async () => {
+    const module = await import('../src/reflect-metadata.js');
+
+    expect(Object.keys(module)).toEqual([]);
+    const metadata = Reflect as unknown as { getMetadata?: unknown };
+    expect(typeof metadata.getMetadata).toBe('function');
+  });
 });

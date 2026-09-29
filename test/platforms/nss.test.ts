@@ -1,8 +1,9 @@
 import { X509Certificate } from 'node:crypto';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mintCa } from '../../src/core/certgen.js';
 import type { Environment } from '../../src/platforms/detect.js';
 import {
@@ -10,6 +11,13 @@ import {
   nssCertificateNickname,
 } from '../../src/platforms/nss.js';
 import type { RunResult } from '../../src/platforms/run.js';
+
+// The adapter's default certutil resolution must not depend on the host;
+// every adapter that omits resolveCertutil behaves as if certutil is absent.
+vi.mock('../../src/platforms/run.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../src/platforms/run.js')>()),
+  resolveNssCertutil: async () => null,
+}));
 
 const roots: string[] = [];
 const certutil = '/fixture/nss/bin/certutil';
@@ -46,6 +54,10 @@ async function fixture(): Promise<{ dir: string; ca: string; other: string }> {
 
 function listing(nickname: string, flags = 'C,,'): string {
   return `Certificate Nickname Trust Attributes\n                   SSL,S/MIME,JAR/XPI\n\n${nickname} ${flags}\n`;
+}
+
+function headerOnly(nickname: string): string {
+  return listing(nickname).split(nickname)[0] ?? '';
 }
 
 function fingerprint(pem: string): string {
@@ -382,6 +394,504 @@ describe('NSS store adapter', () => {
     await expect(missing.install(caPath, '/profile')).rejects.toMatchObject({
       code: 'UNSUPPORTED_PLATFORM',
       message: expect.stringContaining('manual'),
+    });
+    expect(calls).toEqual([]);
+  });
+});
+
+describe('NSS store adapter edge cases', () => {
+  it('reports not-detected when no nss store or no install targets exist', async () => {
+    const { ca } = await fixture();
+    const calls: string[][] = [];
+    const instance = adapter(async (argv) => {
+      calls.push(argv);
+      return result();
+    });
+    const noStore: Environment = { os: 'linux', wsl: false, stores: [] };
+
+    await expect(instance.checkTrust(ca, noStore)).resolves.toEqual([
+      { state: 'not-detected', target: 'default' },
+    ]);
+    await expect(instance.checkTrust(ca, environment())).resolves.toEqual([
+      { state: 'not-detected', target: 'default' },
+    ]);
+    expect(calls).toEqual([]);
+  });
+
+  it('reports unknown trust with manual guidance when certutil cannot be resolved', async () => {
+    const { ca } = await fixture();
+    const calls: string[][] = [];
+    const instance = createNssAdapter({
+      run: async (argv) => {
+        calls.push(argv);
+        return result();
+      },
+      fs: { mkdir: async () => {}, hasDatabaseFile: () => true },
+    });
+
+    await expect(
+      instance.checkTrust(ca, environment('/profile')),
+    ).resolves.toEqual([
+      {
+        state: 'unknown',
+        target: '/profile',
+        detail: expect.stringContaining('manually'),
+      },
+    ]);
+    expect(calls).toEqual([]);
+  });
+
+  it('maps unreadable or ambiguous database responses to unknown per target', async () => {
+    const { ca, other } = await fixture();
+    const nickname = nssCertificateNickname(ca);
+    const generic = 'The NSS database could not be inspected.';
+    const dumps: Record<string, RunResult> = {
+      '/t/dump-fails': result('', 1),
+      '/t/dump-unreadable': result('garbage'),
+      '/t/dump-invalid-pem': result(
+        '-----BEGIN CERTIFICATE-----\nnotbase64!!\n-----END CERTIFICATE-----',
+      ),
+      '/t/no-match': result(other),
+      '/t/two-matches': result(`${ca}\n${ca}`),
+    };
+    const listings: Record<string, RunResult> = {
+      '/t/list-fails': result('', 1),
+      '/t/list-unreadable': result('no recognizable header'),
+      '/t/list-ambiguous': result(`${listing(nickname)}\n${nickname} C,,`),
+    };
+    const targets = [
+      '/t/list-fails',
+      '/t/list-unreadable',
+      '/t/list-ambiguous',
+      '/t/dump-fails',
+      '/t/dump-unreadable',
+      '/t/dump-invalid-pem',
+      '/t/no-match',
+      '/t/two-matches',
+    ];
+    const instance = adapter(async (argv) => {
+      const target = (argv[argv.indexOf('-d') + 1] ?? '').replace('sql:', '');
+      if (argv.includes('-n')) return dumps[target] ?? result(ca);
+      return listings[target] ?? result(listing(nickname));
+    });
+
+    await expect(
+      instance.checkTrust(ca, environment(...targets)),
+    ).resolves.toEqual([
+      { state: 'unknown', target: '/t/list-fails', detail: generic },
+      { state: 'unknown', target: '/t/list-unreadable', detail: generic },
+      { state: 'unknown', target: '/t/list-ambiguous', detail: generic },
+      { state: 'unknown', target: '/t/dump-fails', detail: generic },
+      { state: 'unknown', target: '/t/dump-unreadable', detail: generic },
+      { state: 'unknown', target: '/t/dump-invalid-pem', detail: generic },
+      { state: 'untrusted', target: '/t/no-match' },
+      { state: 'unknown', target: '/t/two-matches', detail: generic },
+    ]);
+  });
+
+  it('inspects installed state from listing rows and dumped fingerprints', async () => {
+    const { ca, other } = await fixture();
+    const nickname = nssCertificateNickname(ca);
+    const dumpFor = (dump: RunResult) =>
+      adapter(async (argv) =>
+        argv.includes('-n') ? dump : result(listing(nickname)),
+      );
+
+    const listFails = adapter(async () => result('', 1));
+    await expect(listFails.inspectInstalled(ca, '/p')).resolves.toBe(
+      'inconclusive',
+    );
+
+    const unreadable = adapter(async () => result('no recognizable header'));
+    await expect(unreadable.inspectInstalled(ca, '/p')).resolves.toBe(
+      'inconclusive',
+    );
+
+    const ambiguous = adapter(async () =>
+      result(`${listing(nickname)}\n${nickname} C,,`),
+    );
+    await expect(ambiguous.inspectInstalled(ca, '/p')).resolves.toBe(
+      'inconclusive',
+    );
+
+    await expect(
+      dumpFor(result('', 1)).inspectInstalled(ca, '/p'),
+    ).resolves.toBe('inconclusive');
+    await expect(
+      dumpFor(result('garbage')).inspectInstalled(ca, '/p'),
+    ).resolves.toBe('inconclusive');
+    await expect(dumpFor(result(ca)).inspectInstalled(ca, '/p')).resolves.toBe(
+      'present',
+    );
+    await expect(
+      dumpFor(result(other)).inspectInstalled(ca, '/p'),
+    ).resolves.toBe('inconclusive');
+    await expect(
+      dumpFor(result(`${ca}\n${ca}`)).inspectInstalled(ca, '/p'),
+    ).resolves.toBe('inconclusive');
+
+    const exploding = adapter(async () => {
+      throw new Error('spawn exploded');
+    });
+    await expect(exploding.inspectInstalled(ca, '/p')).resolves.toBe(
+      'inconclusive',
+    );
+  });
+
+  it('uses the real filesystem to detect database files and create directories', async () => {
+    const { dir, ca } = await fixture();
+    const caPath = join(dir, 'ca.pem');
+    await writeFile(caPath, ca);
+    const nickname = nssCertificateNickname(ca);
+    const cert9Dir = join(dir, 'nine');
+    const cert8Dir = join(dir, 'eight');
+    await mkdir(cert9Dir, { recursive: true });
+    await mkdir(cert8Dir, { recursive: true });
+    await writeFile(join(cert9Dir, 'cert9.db'), '');
+    await writeFile(join(cert8Dir, 'cert8.db'), '');
+
+    const calls: string[][] = [];
+    let added = false;
+    const target = join(dir, 'fresh', 'nssdb');
+    const instance = createNssAdapter({
+      resolveCertutil: async () => certutil,
+      run: async (argv) => {
+        calls.push(argv);
+        if (argv[1] === '-A') {
+          added = true;
+          return result();
+        }
+        if (argv.includes('-n')) return result(added ? ca : '', added ? 0 : 1);
+        return result(added ? listing(nickname) : headerOnly(nickname));
+      },
+    });
+
+    await expect(instance.inspectInstalled(ca, cert9Dir)).resolves.toBe(
+      'absent',
+    );
+    await expect(instance.inspectInstalled(ca, cert8Dir)).resolves.toBe(
+      'absent',
+    );
+    await expect(
+      instance.inspectInstalled(ca, join(dir, 'empty')),
+    ).resolves.toBe('absent');
+    expect(calls).toHaveLength(2);
+
+    await expect(instance.install(caPath, target)).resolves.toEqual({
+      state: 'verified',
+    });
+    expect(existsSync(target)).toBe(true);
+  });
+
+  it('fails the install when the database directory cannot be created', async () => {
+    const { dir, ca } = await fixture();
+    const caPath = join(dir, 'ca.pem');
+    await writeFile(caPath, ca);
+    const calls: string[][] = [];
+    const instance = createNssAdapter({
+      run: async (argv) => {
+        calls.push(argv);
+        return result();
+      },
+      resolveCertutil: async () => certutil,
+      fs: {
+        mkdir: async () => {
+          throw new Error('EACCES: permission denied');
+        },
+        hasDatabaseFile: () => true,
+      },
+    });
+
+    await expect(instance.install(caPath, '/profile')).rejects.toMatchObject({
+      code: 'STORE_WRITE_FAILED',
+      message: expect.stringContaining('Could not initialize'),
+    });
+    expect(calls).toEqual([]);
+  });
+
+  it('preserves existing certificates when the prior database state cannot be cleared', async () => {
+    const { dir, ca, other } = await fixture();
+    const caPath = join(dir, 'ca.pem');
+    await writeFile(caPath, ca);
+    const nickname = nssCertificateNickname(ca);
+
+    // A failed prior listing is not evidence of a conflict; the import proceeds.
+    let recoveredListings = 0;
+    const recovered = adapter(async (argv) => {
+      if (argv[1] === '-A') return result();
+      if (argv.includes('-n')) return result(ca);
+      recoveredListings += 1;
+      return recoveredListings === 1
+        ? result('', 1)
+        : result(listing(nickname));
+    });
+    await expect(recovered.install(caPath, '/profile')).resolves.toEqual({
+      state: 'verified',
+    });
+
+    const rejects = async (
+      run: (argv: string[]) => Promise<RunResult>,
+      message: string,
+    ) => {
+      const calls: string[][] = [];
+      const instance = adapter(async (argv) => {
+        calls.push(argv);
+        return run(argv);
+      });
+      await expect(instance.install(caPath, '/profile')).rejects.toMatchObject({
+        code: 'STORE_WRITE_FAILED',
+        message: expect.stringContaining(message),
+      });
+      expect(calls.some((argv) => argv[1] === '-A')).toBe(false);
+    };
+
+    await rejects(async () => result('no recognizable header'), 'unreadable');
+    await rejects(
+      async () => result(`${listing(nickname)}\n${nickname} C,,`),
+      'ambiguous',
+    );
+    await rejects(
+      async (argv) =>
+        argv.includes('-n') ? result(other) : result(listing(nickname)),
+      'fingerprint',
+    );
+    await rejects(
+      async (argv) =>
+        argv.includes('-n') ? result('', 1) : result(listing(nickname)),
+      'fingerprint',
+    );
+    await rejects(async (argv) => {
+      if (argv[1] === '-D') return result('', 1);
+      return argv.includes('-n') ? result(ca) : result(listing(nickname));
+    }, 'idempotent retry');
+
+    await rejects(async (argv) => {
+      if (argv[1] === '-D') return result();
+      if (argv.includes('-n')) return result(ca);
+      return result(listing(nickname));
+    }, 'could not be cleared');
+
+    let failedListings = 0;
+    await rejects(async (argv) => {
+      if (argv[1] === '-D') return result();
+      if (argv.includes('-n')) return result(ca);
+      failedListings += 1;
+      return failedListings === 1 ? result(listing(nickname)) : result('', 1);
+    }, 'could not be cleared');
+
+    let garbledListings = 0;
+    await rejects(async (argv) => {
+      if (argv[1] === '-D') return result();
+      if (argv.includes('-n')) return result(ca);
+      garbledListings += 1;
+      return garbledListings === 1
+        ? result(listing(nickname))
+        : result('garbage');
+    }, 'could not be cleared');
+  });
+
+  it('returns an inconclusive receipt when the import read-back cannot confirm trust', async () => {
+    const { dir, ca, other } = await fixture();
+    const caPath = join(dir, 'ca.pem');
+    await writeFile(caPath, ca);
+    const nickname = nssCertificateNickname(ca);
+
+    // The first (pre-import) listing is always a clean database; the second
+    // listing and the dump follow the scenario under test.
+    const scenario = (postListing: RunResult, dump: RunResult) => {
+      let listings = 0;
+      return adapter(async (argv) => {
+        if (argv[1] === '-A') return result();
+        if (argv.includes('-n')) return dump;
+        listings += 1;
+        return listings === 1 ? result(headerOnly(nickname)) : postListing;
+      });
+    };
+    const inconclusive = async (
+      postListing: RunResult,
+      dump: RunResult,
+      detail: string,
+    ) => {
+      await expect(
+        scenario(postListing, dump).install(caPath, '/profile'),
+      ).resolves.toMatchObject({
+        state: 'inconclusive',
+        detail: expect.stringContaining(detail),
+      });
+    };
+
+    await inconclusive(
+      result('', 1),
+      result(ca),
+      'its read-back was unavailable',
+    );
+    await inconclusive(
+      result(headerOnly(nickname)),
+      result(ca),
+      'one matching nickname',
+    );
+    await inconclusive(result('garbage'), result(ca), 'one matching nickname');
+    await inconclusive(
+      result(listing(nickname, ',C,')),
+      result(ca),
+      'one matching nickname',
+    );
+    await inconclusive(
+      result(listing(nickname)),
+      result('', 1),
+      'certificate read-back was unavailable',
+    );
+    await inconclusive(
+      result(listing(nickname)),
+      result('garbage'),
+      'did not confirm the CA fingerprint',
+    );
+    await inconclusive(
+      result(listing(nickname)),
+      result(other),
+      'did not confirm the CA fingerprint',
+    );
+  });
+
+  it('fails the install when the CA certificate file cannot be read', async () => {
+    const { dir } = await fixture();
+    const calls: string[][] = [];
+    const instance = adapter(async (argv) => {
+      calls.push(argv);
+      return result();
+    });
+
+    await expect(
+      instance.install(join(dir, 'missing.pem'), '/profile'),
+    ).rejects.toMatchObject({
+      code: 'STORE_WRITE_FAILED',
+      message: expect.stringContaining('Could not verify'),
+    });
+    expect(calls).toEqual([]);
+  });
+
+  it('keeps CA recovery data on every uninstall failure mode', async () => {
+    const { ca } = await fixture();
+    const nickname = nssCertificateNickname(ca);
+
+    // None of these reach certutil -D.
+    const rejectsBeforeDelete = async (
+      run: (argv: string[]) => Promise<RunResult>,
+      message: string,
+    ) => {
+      const calls: string[][] = [];
+      const instance = adapter(async (argv) => {
+        calls.push(argv);
+        return run(argv);
+      });
+      await expect(instance.uninstall(ca, '/profile')).rejects.toMatchObject({
+        code: 'STORE_WRITE_FAILED',
+        message: expect.stringContaining(message),
+      });
+      expect(calls.some((argv) => argv[1] === '-D')).toBe(false);
+    };
+
+    await rejectsBeforeDelete(async () => result('', 1), 'Could not inspect');
+    await rejectsBeforeDelete(
+      async () => result('no recognizable header'),
+      'unreadable',
+    );
+    await rejectsBeforeDelete(
+      async (argv) =>
+        argv.includes('-n') ? result('', 1) : result(listing(nickname)),
+      'fingerprint',
+    );
+    await rejectsBeforeDelete(
+      async (argv) =>
+        argv.includes('-n') ? result('garbage') : result(listing(nickname)),
+      'fingerprint',
+    );
+    await rejectsBeforeDelete(async () => {
+      throw new Error('spawn exploded');
+    }, 'Could not complete NSS CA removal');
+
+    const deleteFails = adapter(async (argv) => {
+      if (argv[1] === '-D') return result('', 1);
+      return argv.includes('-n') ? result(ca) : result(listing(nickname));
+    });
+    await expect(deleteFails.uninstall(ca, '/profile')).rejects.toMatchObject({
+      code: 'STORE_WRITE_FAILED',
+      message: expect.stringContaining('Could not remove'),
+    });
+
+    const stillListed = adapter(async (argv) => {
+      if (argv[1] === '-D') return result();
+      return argv.includes('-n') ? result(ca) : result(listing(nickname));
+    });
+    await expect(stillListed.uninstall(ca, '/profile')).rejects.toMatchObject({
+      code: 'STORE_WRITE_FAILED',
+      message: expect.stringContaining('remains'),
+    });
+
+    let failedListings = 0;
+    const verifyFails = adapter(async (argv) => {
+      if (argv[1] === '-D') return result();
+      if (argv.includes('-n')) return result(ca);
+      failedListings += 1;
+      return failedListings === 1 ? result(listing(nickname)) : result('', 1);
+    });
+    await expect(verifyFails.uninstall(ca, '/profile')).rejects.toMatchObject({
+      code: 'STORE_WRITE_FAILED',
+      message: expect.stringContaining('remains'),
+    });
+
+    let garbledListings = 0;
+    const garbledVerify = adapter(async (argv) => {
+      if (argv[1] === '-D') return result();
+      if (argv.includes('-n')) return result(ca);
+      garbledListings += 1;
+      return garbledListings === 1
+        ? result(listing(nickname))
+        : result('garbage');
+    });
+    await expect(garbledVerify.uninstall(ca, '/profile')).rejects.toMatchObject(
+      {
+        code: 'STORE_WRITE_FAILED',
+        message: expect.stringContaining('remains'),
+      },
+    );
+  });
+
+  it('treats uninstall as a no-op when the nickname is absent', async () => {
+    const { ca } = await fixture();
+    const nickname = nssCertificateNickname(ca);
+    const calls: string[][] = [];
+    const instance = adapter(async (argv) => {
+      calls.push(argv);
+      return result(headerOnly(nickname));
+    });
+
+    await expect(instance.uninstall(ca, '/profile')).resolves.toBeUndefined();
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.[1]).toBe('-L');
+  });
+
+  it('refuses writes to paths that resolve to /etc/pki/nssdb', async () => {
+    const { dir, ca } = await fixture();
+    const caPath = join(dir, 'ca.pem');
+    await writeFile(caPath, ca);
+    const calls: string[][] = [];
+    const instance = adapter(async (argv) => {
+      calls.push(argv);
+      return result();
+    });
+
+    await expect(
+      instance.install(caPath, '/etc/pki/../pki/nssdb'),
+    ).rejects.toMatchObject({
+      code: 'STORE_WRITE_FAILED',
+      message: expect.stringContaining('/etc/pki/nssdb'),
+    });
+    await expect(
+      instance.uninstall(ca, '/pki/../etc/pki/nssdb'),
+    ).rejects.toMatchObject({
+      code: 'STORE_WRITE_FAILED',
+      message: expect.stringContaining('/etc/pki/nssdb'),
     });
     expect(calls).toEqual([]);
   });

@@ -1,9 +1,9 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { createHash, createPrivateKey } from 'node:crypto';
+import { createHash, createPrivateKey, webcrypto } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mintCa, mintLeaf } from '../../src/core/certgen.js';
 import type { ValidName } from '../../src/core/validate.js';
 
@@ -140,5 +140,47 @@ describe('certificate generation', () => {
         code: 'INVALID_NAME',
       },
     );
+  });
+
+  it.each([0, 1.5, Number.NaN])(
+    'rejects non-integer leaf validity %s',
+    async (validityDays) => {
+      await expect(
+        mintLeaf(await mintCa('alice'), names, validityDays),
+      ).rejects.toMatchObject({
+        code: 'INVALID_OPTIONS',
+      });
+    },
+  );
+
+  it('uses the IP address as the leaf common name', async () => {
+    const ca = await mintCa('alice');
+    const leaf = await mintLeaf(ca, [{ kind: 'ip', ip: '127.0.0.1' }], 30);
+    const { X509Certificate } = await import('@peculiar/x509');
+
+    expect(new X509Certificate(leaf.certPem).subject).toContain('CN=127.0.0.1');
+  });
+
+  it('wraps a CA key export failure as GENERATION_FAILED', async () => {
+    const exportKey = vi
+      .spyOn(webcrypto.subtle, 'exportKey')
+      .mockRejectedValueOnce(new Error('key export failed'));
+    try {
+      await expect(mintCa('alice')).rejects.toMatchObject({
+        code: 'GENERATION_FAILED',
+      });
+    } finally {
+      exportKey.mockRestore();
+    }
+  });
+
+  it('wraps corrupt CA material as GENERATION_FAILED when minting a leaf', async () => {
+    const ca = await mintCa('alice');
+
+    await expect(
+      mintLeaf({ ...ca, keyPem: 'not a private key' }, names, 30),
+    ).rejects.toMatchObject({
+      code: 'GENERATION_FAILED',
+    });
   });
 });

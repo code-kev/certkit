@@ -1,8 +1,42 @@
 import { inspect } from 'node:util';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { resolveNssCertutil, run } from '../../src/platforms/run.js';
 
+const platformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform');
+
+function setPlatform(platform: NodeJS.Platform): void {
+  Object.defineProperty(process, 'platform', {
+    configurable: true,
+    value: platform,
+  });
+}
+
+afterEach(() => {
+  if (platformDescriptor)
+    Object.defineProperty(process, 'platform', platformDescriptor);
+});
+
 describe('platform command runner', () => {
+  it('requires a command', async () => {
+    await expect(run([])).rejects.toMatchObject({
+      code: 'INVALID_OPTIONS',
+      message: 'A command is required.',
+    });
+    await expect(run([''])).rejects.toMatchObject({
+      code: 'INVALID_OPTIONS',
+    });
+  });
+
+  it('returns captured output with a nonzero exit code', async () => {
+    await expect(
+      run([
+        process.execPath,
+        '-e',
+        'process.stdout.write("out"); process.stderr.write("err"); process.exit(3)',
+      ]),
+    ).resolves.toEqual({ code: 3, stdout: 'out', stderr: 'err' });
+  });
+
   it('passes argv entries as data without shell interpretation', async () => {
     const args = ['$(rm -rf ~)', 'space here', '; echo unsafe'];
     const result = await run([
@@ -109,5 +143,26 @@ describe('platform command runner', () => {
         CERTKIT_CERTUTIL: 'C:\\Windows\\System32\\certutil.exe',
       }),
     ).resolves.toBeNull();
+  });
+
+  it('probes the NSS program-files locations on Windows', async () => {
+    setPlatform('win32');
+    await expect(resolveNssCertutil()).resolves.toBeNull();
+  });
+
+  it('probes the Homebrew and /usr/local locations on macOS', async () => {
+    setPlatform('darwin');
+    expect([
+      null,
+      '/opt/homebrew/bin/certutil',
+      '/usr/local/bin/certutil',
+    ]).toContain(await resolveNssCertutil());
+  });
+
+  it('probes the system locations on Linux', async () => {
+    setPlatform('linux');
+    expect([null, '/usr/bin/certutil', '/usr/local/bin/certutil']).toContain(
+      await resolveNssCertutil(),
+    );
   });
 });

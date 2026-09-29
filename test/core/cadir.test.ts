@@ -5,6 +5,7 @@ import fs, {
   existsSync,
   lstatSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   rmSync,
   symlinkSync,
@@ -25,6 +26,7 @@ import {
   writePrivateKey as writePrivateKeyCore,
   writeStateAtomic as writeStateAtomicCore,
 } from '../../src/core/cadir.js';
+import { CertkitError } from '../../src/core/errors.js';
 import { createWindowsFsGuard } from '../../src/platforms/fsguard.js';
 
 const workerDir = process.env.CERTKIT_LOCK_RACE_DIR;
@@ -74,7 +76,11 @@ function writePrivateKey(
 function withLock<T>(
   dir: string,
   fn: () => Promise<T>,
-  options?: { fsGuard?: FsGuard; timeoutMs?: number },
+  options?: {
+    fsGuard?: FsGuard;
+    timeoutMs?: number;
+    removeDirectoryIfEmpty?: boolean;
+  },
 ): Promise<T> {
   return withLockCore(dir, fn, {
     ...fileOptions(options?.fsGuard),
@@ -816,5 +822,616 @@ describe('Windows ACL guard', () => {
     expect(() =>
       guard.protectDirectory('C:\\Users\\test\\certkit'),
     ).toThrowError(expect.objectContaining({ code: 'CA_UNREADABLE' }));
+  });
+});
+
+describe('CA directory hardening edges', () => {
+  it('requires an FsGuard for CA directory protection on Windows', () => {
+    setPlatform('win32');
+    expect(() =>
+      writeStateAtomicCore(join(tempRoot, 'ca'), state(), {}),
+    ).toThrowError(
+      expect.objectContaining({
+        code: 'CA_UNREADABLE',
+        message: expect.stringContaining(
+          'Windows CA directory protection is unavailable',
+        ),
+      }),
+    );
+  });
+
+  it('creates a CA directory without POSIX hardening on Windows', () => {
+    setPlatform('win32');
+    const dir = join(tempRoot, 'ca');
+    const guard: FsGuard = {
+      protectDirectory: () => undefined,
+      assertProtectedDirectory: () => undefined,
+      assertProtectedFile: () => undefined,
+    };
+
+    writeStateAtomicCore(dir, state(), { fsGuard: guard });
+
+    expect(readStateCore(dir, { fsGuard: guard })).toEqual(state());
+  });
+
+  it('falls back to the default profile Local AppData on Windows', () => {
+    setPlatform('win32');
+    expect(resolveCaDir()).toBe(
+      win32.join(homedir(), 'AppData', 'Local', 'certkit'),
+    );
+  });
+
+  it('wraps guard failures and rethrows guard CertkitErrors', () => {
+    const dir = join(tempRoot, 'ca');
+    const plainFailure: FsGuard = {
+      protectDirectory: () => {
+        throw new Error('icacls exited 5');
+      },
+      assertProtectedDirectory: () => undefined,
+      assertProtectedFile: () => undefined,
+    };
+    expect(() =>
+      writeStateAtomic(dir, state(), { fsGuard: plainFailure }),
+    ).toThrowError(
+      expect.objectContaining({
+        code: 'CA_UNREADABLE',
+        message: expect.stringContaining(
+          'Filesystem protection could not be verified',
+        ),
+      }),
+    );
+
+    const certkitFailure: FsGuard = {
+      protectDirectory: () => {
+        throw new CertkitError('CA_UNREADABLE', 'guard rejected the directory');
+      },
+      assertProtectedDirectory: () => undefined,
+      assertProtectedFile: () => undefined,
+    };
+    expect(() =>
+      writeStateAtomic(dir, state(), { fsGuard: certkitFailure }),
+    ).toThrowError(
+      expect.objectContaining({
+        code: 'CA_UNREADABLE',
+        message: 'guard rejected the directory',
+      }),
+    );
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'rejects a state file with loose permissions',
+    () => {
+      const dir = join(tempRoot, 'ca');
+      writeStateAtomic(dir, state());
+      chmodSync(join(dir, 'state.json'), 0o644);
+
+      expect(() => readState(dir)).toThrowError(
+        expect.objectContaining({
+          code: 'CA_UNREADABLE',
+          message: expect.stringContaining('CA file permissions are not 0600'),
+        }),
+      );
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'wraps a CA directory creation failure',
+    () => {
+      const parent = join(tempRoot, 'blocked');
+      mkdirSync(parent, { mode: 0o700 });
+      chmodSync(parent, 0o500);
+      try {
+        expect(() =>
+          writeStateAtomic(join(parent, 'ca'), state()),
+        ).toThrowError(
+          expect.objectContaining({
+            code: 'CA_UNREADABLE',
+            message: expect.stringContaining('Could not create CA directory'),
+          }),
+        );
+      } finally {
+        chmodSync(parent, 0o700);
+      }
+    },
+  );
+
+  it.each([
+    ['a non-record state', 'null'],
+    [
+      'a write record that is not an object',
+      JSON.stringify({ ...state(), trustWrites: [null] }),
+    ],
+    ['an unsupported version', JSON.stringify({ ...state(), version: 2 })],
+    ['a missing CA record', JSON.stringify({ ...state(), ca: null })],
+    [
+      'a non-string CA subject',
+      JSON.stringify({ ...state(), ca: { ...state().ca, subject: 42 } }),
+    ],
+    [
+      'a non-hash CA fingerprint',
+      JSON.stringify({ ...state(), ca: { ...state().ca, sha256: 'nope' } }),
+    ],
+    [
+      'a pending write without a fingerprint',
+      JSON.stringify({
+        ...state(),
+        pendingWrites: [
+          { store: 'nss', target: '/x', timestamp: '2026-01-01T00:00:00.000Z' },
+        ],
+      }),
+    ],
+  ])('rejects malformed state with %s', (_description, json) => {
+    const dir = join(tempRoot, 'ca');
+    mkdirSync(dir, { mode: 0o700 });
+    writeFileSync(join(dir, 'state.json'), json, { mode: 0o600 });
+
+    expect(() => readState(dir)).toThrowError(
+      expect.objectContaining({
+        code: 'CA_UNREADABLE',
+        message: expect.stringContaining('unsupported or malformed schema'),
+      }),
+    );
+  });
+
+  it('rejects an unparseable state file', () => {
+    const dir = join(tempRoot, 'ca');
+    mkdirSync(dir, { mode: 0o700 });
+    writeFileSync(join(dir, 'state.json'), '{invalid json', { mode: 0o600 });
+
+    expect(() => readState(dir)).toThrowError(
+      expect.objectContaining({
+        code: 'CA_UNREADABLE',
+        message: expect.stringContaining('Could not read CA state'),
+      }),
+    );
+  });
+
+  it('refuses to write malformed state', () => {
+    const dir = join(tempRoot, 'ca');
+
+    expect(() =>
+      writeStateAtomic(dir, { ...state(), phase: 'unknown' } as StateFile),
+    ).toThrowError(
+      expect.objectContaining({
+        code: 'CA_UNREADABLE',
+        message: expect.stringContaining(
+          'Refusing to write malformed CA state',
+        ),
+      }),
+    );
+    expect(existsSync(dir)).toBe(false);
+  });
+
+  it('cleans up the temp file when guard verification fails during a state write', () => {
+    const dir = join(tempRoot, 'ca');
+    const guard: FsGuard = {
+      protectDirectory: () => undefined,
+      assertProtectedDirectory: () => undefined,
+      assertProtectedFile: (path) => {
+        if (path.includes('.state-')) throw new Error('temp rejected');
+      },
+    };
+
+    expect(() =>
+      writeStateAtomic(dir, state(), { fsGuard: guard }),
+    ).toThrowError(
+      expect.objectContaining({
+        code: 'CA_UNREADABLE',
+        message: expect.stringContaining(
+          'Filesystem protection could not be verified',
+        ),
+      }),
+    );
+    expect(readdirSync(dir).some((name) => name.includes('.state-'))).toBe(
+      false,
+    );
+  });
+
+  it('wraps a state rename failure', () => {
+    const dir = join(tempRoot, 'ca');
+    const rename = fs.renameSync;
+    fs.renameSync = ((target, destination) => {
+      if (String(destination).endsWith('state.json'))
+        throw new Error('cross-device link');
+      return rename(target, destination);
+    }) as typeof fs.renameSync;
+    syncBuiltinESMExports();
+    try {
+      expect(() => writeStateAtomic(dir, state())).toThrowError(
+        expect.objectContaining({
+          code: 'CA_UNREADABLE',
+          message: expect.stringContaining(
+            'Could not atomically write CA state',
+          ),
+        }),
+      );
+    } finally {
+      fs.renameSync = rename;
+      syncBuiltinESMExports();
+    }
+    expect(readdirSync(dir).some((name) => name.includes('.state-'))).toBe(
+      false,
+    );
+  });
+
+  it.each(['', '.', '..', join('one', 'two'), 'one\\two'])(
+    'rejects a multi-component private key filename %p',
+    (filename) => {
+      const dir = join(tempRoot, 'ca');
+      writeStateAtomic(dir, state());
+
+      expect(() => writePrivateKey(dir, filename, 'key')).toThrowError(
+        expect.objectContaining({
+          code: 'CA_UNREADABLE',
+          message: expect.stringContaining('single path component'),
+        }),
+      );
+    },
+  );
+
+  it('cleans up the key file when guard verification fails during a key write', () => {
+    const dir = join(tempRoot, 'ca');
+    writeStateAtomic(dir, state());
+    const guard: FsGuard = {
+      protectDirectory: () => undefined,
+      assertProtectedDirectory: () => undefined,
+      assertProtectedFile: (path) => {
+        if (path.endsWith('ca-key.pem')) throw new Error('key rejected');
+      },
+    };
+
+    expect(() =>
+      writePrivateKey(dir, 'ca-key.pem', 'key', { fsGuard: guard }),
+    ).toThrowError(
+      expect.objectContaining({
+        code: 'CA_UNREADABLE',
+        message: expect.stringContaining(
+          'Filesystem protection could not be verified',
+        ),
+      }),
+    );
+    expect(existsSync(join(dir, 'ca-key.pem'))).toBe(false);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'wraps a private key creation failure in an unwritable directory',
+    () => {
+      const dir = join(tempRoot, 'ca');
+      writeStateAtomic(dir, state());
+      chmodSync(dir, 0o500);
+      try {
+        expect(() => writePrivateKey(dir, 'ca-key.pem', 'key')).toThrowError(
+          expect.objectContaining({
+            code: 'CA_UNREADABLE',
+            message: expect.stringContaining(
+              'Could not create protected CA key',
+            ),
+          }),
+        );
+      } finally {
+        chmodSync(dir, 0o700);
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'rethrows a CertkitError from post-creation directory inspection',
+    () => {
+      const target = join(tempRoot, 'ca');
+      const lstat = fs.lstatSync;
+      let inspections = 0;
+      fs.lstatSync = ((path, options) => {
+        if (path === target) {
+          inspections += 1;
+          if (inspections > 1)
+            throw Object.assign(new Error('denied'), { code: 'EACCES' });
+        }
+        return lstat(path, options);
+      }) as typeof fs.lstatSync;
+      syncBuiltinESMExports();
+      try {
+        expect(() => writeStateAtomic(target, state())).toThrowError(
+          expect.objectContaining({
+            code: 'CA_UNREADABLE',
+            message: expect.stringContaining(
+              'Cannot inspect CA filesystem entry',
+            ),
+          }),
+        );
+      } finally {
+        fs.lstatSync = lstat;
+        syncBuiltinESMExports();
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'wraps a state temp file creation failure in an unwritable directory',
+    () => {
+      const dir = join(tempRoot, 'ca');
+      mkdirSync(dir, { mode: 0o700 });
+      chmodSync(dir, 0o500);
+      try {
+        expect(() => writeStateAtomic(dir, state())).toThrowError(
+          expect.objectContaining({
+            code: 'CA_UNREADABLE',
+            message: expect.stringContaining(
+              'Could not atomically write CA state',
+            ),
+          }),
+        );
+      } finally {
+        chmodSync(dir, 0o700);
+      }
+    },
+  );
+});
+
+describe('CA directory lock edges', () => {
+  it.each([-1, Number.NaN])(
+    'rejects an invalid lock timeout %s',
+    async (timeoutMs) => {
+      await expect(
+        withLock(join(tempRoot, 'ca'), async () => undefined, { timeoutMs }),
+      ).rejects.toMatchObject({
+        code: 'CA_UNREADABLE',
+        message: expect.stringContaining('Lock timeout must be non-negative'),
+      });
+    },
+  );
+
+  it.each([
+    ['a JSON array', '[1]'],
+    [
+      'a zero pid',
+      JSON.stringify({ pid: 0, startedAt: new Date().toISOString() }),
+    ],
+    [
+      'a non-integer pid',
+      JSON.stringify({ pid: 1.5, startedAt: new Date().toISOString() }),
+    ],
+    ['an invalid timestamp', JSON.stringify({ pid: 1, startedAt: 'never' })],
+    ['newline-terminated garbage', 'garbage\n'],
+  ])(
+    'rejects a contended lock holding %s without waiting',
+    async (_description, contents) => {
+      const dir = join(tempRoot, 'ca');
+      mkdirSync(dir, { mode: 0o700 });
+      const lockPath = join(dir, '.lock');
+      writeFileSync(lockPath, contents, { mode: 0o600 });
+      try {
+        await expect(
+          withLock(dir, async () => undefined, { timeoutMs: 50 }),
+        ).rejects.toMatchObject({
+          code: 'CA_UNREADABLE',
+          message: expect.stringContaining('unreadable or malformed'),
+        });
+      } finally {
+        rmSync(lockPath, { force: true });
+      }
+    },
+  );
+
+  it('removes its fresh lock when guard verification fails', async () => {
+    const dir = join(tempRoot, 'ca');
+    mkdirSync(dir, { mode: 0o700 });
+    const lockPath = join(dir, '.lock');
+    const guard: FsGuard = {
+      protectDirectory: () => undefined,
+      assertProtectedDirectory: () => undefined,
+      assertProtectedFile: (path) => {
+        if (path === lockPath)
+          throw new CertkitError('CA_UNREADABLE', 'lock rejected');
+      },
+    };
+
+    await expect(
+      withLock(dir, async () => undefined, { fsGuard: guard }),
+    ).rejects.toMatchObject({
+      code: 'CA_UNREADABLE',
+      message: 'lock rejected',
+    });
+    expect(existsSync(lockPath)).toBe(false);
+  });
+
+  it('wraps a lock record write failure', async () => {
+    const dir = join(tempRoot, 'ca');
+    mkdirSync(dir, { mode: 0o700 });
+    const write = fs.writeFileSync;
+    fs.writeFileSync = ((
+      target: unknown,
+      data?: unknown,
+      options?: unknown,
+    ) => {
+      if (typeof target === 'number') throw new Error('disk full');
+      return (write as (t: unknown, d?: unknown, o?: unknown) => void)(
+        target,
+        data,
+        options,
+      );
+    }) as typeof fs.writeFileSync;
+    syncBuiltinESMExports();
+    try {
+      await expect(
+        withLock(dir, async () => undefined, { timeoutMs: 1000 }),
+      ).rejects.toMatchObject({
+        code: 'CA_UNREADABLE',
+        message: expect.stringContaining('Could not create CA lock'),
+      });
+    } finally {
+      fs.writeFileSync = write;
+      syncBuiltinESMExports();
+    }
+    expect(existsSync(join(dir, '.lock'))).toBe(false);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'wraps a lock creation failure from an unwritable directory',
+    async () => {
+      const dir = join(tempRoot, 'ca');
+      mkdirSync(dir, { mode: 0o700 });
+      chmodSync(dir, 0o500);
+      try {
+        await expect(
+          withLock(dir, async () => undefined, { timeoutMs: 50 }),
+        ).rejects.toMatchObject({
+          code: 'CA_UNREADABLE',
+          message: expect.stringContaining('Could not create CA lock'),
+        });
+      } finally {
+        chmodSync(dir, 0o700);
+      }
+    },
+  );
+
+  it('reports a lock release failure when the lock cannot be removed', async () => {
+    const dir = join(tempRoot, 'ca');
+    mkdirSync(dir, { mode: 0o700 });
+    const lockPath = join(dir, '.lock');
+    const unlink = fs.unlinkSync;
+    fs.unlinkSync = ((path) => {
+      if (path === lockPath) throw new Error('unlink failed');
+      return unlink(path);
+    }) as typeof fs.unlinkSync;
+    syncBuiltinESMExports();
+    try {
+      await expect(
+        withLock(dir, async () => 'done', { timeoutMs: 1000 }),
+      ).rejects.toMatchObject({
+        code: 'CA_UNREADABLE',
+        message: expect.stringContaining('Could not release CA lock'),
+      });
+    } finally {
+      fs.unlinkSync = unlink;
+      syncBuiltinESMExports();
+      rmSync(lockPath, { force: true });
+    }
+  });
+
+  it('suggests Remove-Item for manual lock recovery on Windows', async () => {
+    setPlatform('win32');
+    const dir = join(tempRoot, 'ca');
+    mkdirSync(dir, { mode: 0o700 });
+    const lockPath = join(dir, '.lock');
+    writeFileSync(
+      lockPath,
+      JSON.stringify({
+        pid: process.pid + 10_000,
+        startedAt: new Date().toISOString(),
+      }),
+      { mode: 0o600 },
+    );
+    const guard: FsGuard = {
+      protectDirectory: () => undefined,
+      assertProtectedDirectory: () => undefined,
+      assertProtectedFile: () => undefined,
+    };
+    try {
+      await expect(
+        withLockCore(dir, async () => undefined, {
+          timeoutMs: 15,
+          fsGuard: guard,
+        }),
+      ).rejects.toMatchObject({
+        code: 'CA_UNREADABLE',
+        message: expect.stringContaining('Remove-Item'),
+      });
+    } finally {
+      rmSync(lockPath, { force: true });
+    }
+  });
+
+  it('treats an uninspectable contended lock as changed and retries until timeout', async () => {
+    const dir = join(tempRoot, 'ca');
+    mkdirSync(dir, { mode: 0o700 });
+    const lockPath = join(dir, '.lock');
+    writeFileSync(
+      lockPath,
+      JSON.stringify({
+        pid: process.pid + 10_000,
+        startedAt: new Date().toISOString(),
+      }),
+      { mode: 0o600 },
+    );
+    const lstat = fs.lstatSync;
+    let tripped = false;
+    fs.lstatSync = ((path, options) => {
+      if (!tripped && path === lockPath) {
+        tripped = true;
+        throw new Error('stat failed');
+      }
+      return lstat(path, options);
+    }) as typeof fs.lstatSync;
+    syncBuiltinESMExports();
+    try {
+      await expect(
+        withLock(dir, async () => undefined, { timeoutMs: 20 }),
+      ).rejects.toMatchObject({
+        code: 'CA_UNREADABLE',
+        message: expect.stringContaining('Timed out waiting for the CA lock'),
+      });
+      expect(tripped).toBe(true);
+    } finally {
+      fs.lstatSync = lstat;
+      syncBuiltinESMExports();
+      rmSync(lockPath, { force: true });
+    }
+  });
+
+  it('removes the CA directory after the lock when empty and requested', async () => {
+    const dir = join(tempRoot, 'ca');
+
+    await expect(
+      withLock(dir, async () => 'done', { removeDirectoryIfEmpty: true }),
+    ).resolves.toBe('done');
+    expect(existsSync(dir)).toBe(false);
+  });
+
+  it('keeps a nonempty CA directory on a removal request', async () => {
+    const dir = join(tempRoot, 'ca');
+    mkdirSync(dir, { mode: 0o700 });
+    writeFileSync(join(dir, 'keep'), 'data', { mode: 0o600 });
+
+    await expect(
+      withLock(dir, async () => 'done', { removeDirectoryIfEmpty: true }),
+    ).resolves.toBe('done');
+    expect(existsSync(join(dir, 'keep'))).toBe(true);
+  });
+
+  it('ignores a CA directory that vanishes during removal', async () => {
+    const dir = join(tempRoot, 'ca');
+    const rmdir = fs.rmdirSync;
+    fs.rmdirSync = (() => {
+      throw Object.assign(new Error('gone'), { code: 'ENOENT' });
+    }) as typeof fs.rmdirSync;
+    syncBuiltinESMExports();
+    try {
+      await expect(
+        withLock(dir, async () => 'done', { removeDirectoryIfEmpty: true }),
+      ).resolves.toBe('done');
+    } finally {
+      fs.rmdirSync = rmdir;
+      syncBuiltinESMExports();
+    }
+  });
+
+  it('reports a CA directory removal failure that is not emptiness', async () => {
+    const dir = join(tempRoot, 'ca');
+    const rmdir = fs.rmdirSync;
+    fs.rmdirSync = (() => {
+      throw Object.assign(new Error('busy'), { code: 'EACCES' });
+    }) as typeof fs.rmdirSync;
+    syncBuiltinESMExports();
+    try {
+      await expect(
+        withLock(dir, async () => 'done', { removeDirectoryIfEmpty: true }),
+      ).rejects.toMatchObject({
+        code: 'CA_UNREADABLE',
+        message: expect.stringContaining('Could not release CA lock'),
+      });
+    } finally {
+      fs.rmdirSync = rmdir;
+      syncBuiltinESMExports();
+    }
   });
 });

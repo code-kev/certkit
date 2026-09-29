@@ -1,6 +1,6 @@
 import { X509Certificate } from 'node:crypto';
 import { existsSync, statSync } from 'node:fs';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -435,5 +435,384 @@ describe('macOS keychain adapter', () => {
     expect(calls.some((argv) => argv.includes('-d'))).toBe(false);
     expect(calls.some((argv) => argv.includes(otherKeychain))).toBe(false);
     expect(otherCert).toBe(true);
+  });
+
+  it('rejects non-default targets before touching the keychain', async () => {
+    const { ca } = await certificates();
+    const { caCertPath, keychainPath } = await fixture(ca);
+    let calls = 0;
+    const instance = adapter(caCertPath, keychainPath, async () => {
+      calls++;
+      return result();
+    });
+
+    for (const act of [
+      () => instance.inspectInstalled(ca, 'system'),
+      () => instance.install(caCertPath, 'system'),
+      () => instance.uninstall(ca, 'system'),
+    ])
+      await expect(act()).rejects.toMatchObject({
+        code: 'STORE_WRITE_FAILED',
+        message: expect.stringContaining('only supports target "default"'),
+      });
+    expect(calls).toBe(0);
+  });
+
+  it('inspects installed state by fingerprint without exporting trust settings', async () => {
+    const { ca, other } = await certificates();
+    const { caCertPath, keychainPath } = await fixture(ca);
+    const present = adapter(caCertPath, keychainPath, async () => result(ca));
+    await expect(present.inspectInstalled(ca, 'default')).resolves.toBe(
+      'present',
+    );
+
+    const absent = adapter(caCertPath, keychainPath, async () => result(other));
+    await expect(absent.inspectInstalled(ca, 'default')).resolves.toBe(
+      'absent',
+    );
+
+    const unreadable = adapter(caCertPath, keychainPath, async () =>
+      result('', 1, 'read failed'),
+    );
+    await expect(unreadable.inspectInstalled(ca, 'default')).resolves.toBe(
+      'inconclusive',
+    );
+
+    await expect(
+      present.inspectInstalled('not a pem', 'default'),
+    ).resolves.toBe('inconclusive');
+  });
+
+  it('treats a malformed keychain certificate block as inconclusive', async () => {
+    const { ca } = await certificates();
+    const { caCertPath, keychainPath } = await fixture(ca);
+    const instance = adapter(caCertPath, keychainPath, async () =>
+      result(
+        '-----BEGIN CERTIFICATE-----\n###not-a-certificate###\n-----END CERTIFICATE-----',
+      ),
+    );
+
+    await expect(instance.inspectInstalled(ca, 'default')).resolves.toBe(
+      'inconclusive',
+    );
+  });
+
+  it('reports unknown when the user keychain list fails or is malformed', async () => {
+    const { ca } = await certificates();
+    const { caCertPath, keychainPath } = await fixture(ca);
+    const expected = [
+      {
+        state: 'unknown',
+        target: 'default',
+        detail: expect.stringContaining('keychain list'),
+      },
+    ];
+
+    const failed = adapter(caCertPath, keychainPath, async () =>
+      result('', 1, 'list failed'),
+    );
+    await expect(failed.checkTrust(ca, environment)).resolves.toEqual(expected);
+
+    const interiorQuote = adapter(caCertPath, keychainPath, async () =>
+      result('"bad "quoted" path"'),
+    );
+    await expect(interiorQuote.checkTrust(ca, environment)).resolves.toEqual(
+      expected,
+    );
+
+    const emptyPath = adapter(caCertPath, keychainPath, async () =>
+      result('""'),
+    );
+    await expect(emptyPath.checkTrust(ca, environment)).resolves.toEqual(
+      expected,
+    );
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'reports unknown when the login keychain exists but cannot be inspected',
+    async () => {
+      const { ca } = await certificates();
+      const { caCertPath } = await fixture(ca);
+      const lockedDir = join(dirname(caCertPath), 'locked');
+      await mkdir(lockedDir);
+      const keychainPath = join(lockedDir, 'login.keychain-db');
+      await writeFile(keychainPath, 'fixture keychain');
+      await chmod(lockedDir, 0o000);
+      let calls = 0;
+      const instance = adapter(caCertPath, keychainPath, async () => {
+        calls++;
+        return result();
+      });
+
+      try {
+        await expect(instance.checkTrust(ca, environment)).resolves.toEqual([
+          {
+            state: 'unknown',
+            target: 'default',
+            detail: expect.stringContaining('could not be inspected'),
+          },
+        ]);
+        expect(calls).toBe(0);
+      } finally {
+        await chmod(lockedDir, 0o700);
+      }
+    },
+  );
+
+  it('reports unknown when the CA file no longer matches the requested identity', async () => {
+    const { ca, other } = await certificates();
+    const { caCertPath, keychainPath } = await fixture(other);
+    let calls = 0;
+    const instance = adapter(caCertPath, keychainPath, async () => {
+      calls++;
+      return result();
+    });
+
+    await expect(instance.checkTrust(ca, environment)).resolves.toEqual([
+      {
+        state: 'unknown',
+        target: 'default',
+        detail: expect.stringContaining('does not match'),
+      },
+    ]);
+    expect(calls).toBe(0);
+  });
+
+  it('reports not-detected when the login keychain file is absent', async () => {
+    const { ca } = await certificates();
+    const { caCertPath, keychainPath } = await fixture(ca);
+    await rm(keychainPath);
+    let calls = 0;
+    const instance = adapter(caCertPath, keychainPath, async () => {
+      calls++;
+      return result();
+    });
+
+    await expect(instance.checkTrust(ca, environment)).resolves.toEqual([
+      {
+        state: 'not-detected',
+        target: 'default',
+        detail: expect.stringContaining('unavailable'),
+      },
+    ]);
+    expect(calls).toBe(0);
+  });
+
+  it('reports unknown when the keychain certificate read fails', async () => {
+    const { ca } = await certificates();
+    const { caCertPath, keychainPath } = await fixture(ca);
+    const instance = adapter(caCertPath, keychainPath, async (argv) =>
+      argv[1] === 'list-keychains'
+        ? result(`"${keychainPath}"\n`)
+        : result('', 1, 'read failed'),
+    );
+
+    await expect(instance.checkTrust(ca, environment)).resolves.toEqual([
+      {
+        state: 'unknown',
+        target: 'default',
+        detail: expect.stringContaining('inconclusive'),
+      },
+    ]);
+  });
+
+  it('reports unknown when the SSL policy result is neither success nor refusal', async () => {
+    const { ca } = await certificates();
+    const { caCertPath, keychainPath } = await fixture(ca);
+    const instance = adapter(caCertPath, keychainPath, async (argv) =>
+      argv[1] === 'list-keychains'
+        ? result(`"${keychainPath}"\n`)
+        : argv[1] === 'find-certificate'
+          ? result(ca)
+          : result('', 1, 'errSecInternalComponent'),
+    );
+
+    await expect(instance.checkTrust(ca, environment)).resolves.toEqual([
+      {
+        state: 'unknown',
+        target: 'default',
+        detail: 'The default SSL trust result could not be established.',
+      },
+    ]);
+  });
+
+  it('reports unknown when the CA file cannot be read at all', async () => {
+    const { ca } = await certificates();
+    const { caCertPath, keychainPath } = await fixture(ca);
+    await rm(caCertPath);
+    let calls = 0;
+    const instance = adapter(caCertPath, keychainPath, async () => {
+      calls++;
+      return result();
+    });
+
+    await expect(instance.checkTrust(ca, environment)).resolves.toEqual([
+      {
+        state: 'unknown',
+        target: 'default',
+        detail: expect.stringContaining('could not be established'),
+      },
+    ]);
+    expect(calls).toBe(0);
+  });
+
+  it('refuses install when the user keychain list cannot be confirmed', async () => {
+    const { ca } = await certificates();
+    const { caCertPath, keychainPath } = await fixture(ca);
+    const instance = adapter(caCertPath, keychainPath, async () =>
+      result('', 1, 'list failed'),
+    );
+
+    await expect(instance.install(caCertPath, 'default')).rejects.toMatchObject(
+      {
+        code: 'STORE_WRITE_FAILED',
+        message: expect.stringContaining('not confirmed in'),
+      },
+    );
+  });
+
+  it('keeps a successful add inconclusive when the read-back command crashes', async () => {
+    const { ca } = await certificates();
+    const { caCertPath, keychainPath } = await fixture(ca);
+    const instance = adapter(caCertPath, keychainPath, async (argv) => {
+      if (argv[1] === 'list-keychains') return result(`"${keychainPath}"\n`);
+      if (argv[1] === 'find-certificate') throw new Error('security crashed');
+      return result();
+    });
+
+    await expect(instance.install(caCertPath, 'default')).resolves.toEqual({
+      state: 'inconclusive',
+      detail: expect.stringContaining('read-back was unavailable'),
+    });
+  });
+
+  it('fails install when the CA is absent after a successful add command', async () => {
+    const { ca, other } = await certificates();
+    const { caCertPath, keychainPath } = await fixture(ca);
+    const instance = adapter(caCertPath, keychainPath, async (argv) => {
+      if (argv[1] === 'list-keychains') return result(`"${keychainPath}"\n`);
+      if (argv[1] === 'find-certificate') return result(other);
+      return result();
+    });
+
+    await expect(instance.install(caCertPath, 'default')).rejects.toMatchObject(
+      {
+        code: 'STORE_WRITE_FAILED',
+        message: expect.stringContaining('did not contain'),
+      },
+    );
+  });
+
+  it('wraps unexpected install failures without recovery guidance', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'certkit macos -'));
+    tempDirs.push(dir);
+    const missing = join(dir, 'missing-ca.pem');
+    const instance = adapter(
+      missing,
+      join(dir, 'login.keychain-db'),
+      async () => result(),
+    );
+
+    await expect(instance.install(missing, 'default')).rejects.toMatchObject({
+      code: 'STORE_WRITE_FAILED',
+      message: expect.stringContaining('Could not verify'),
+    });
+  });
+
+  it('retains recovery data when the CA file does not match the uninstall identity', async () => {
+    const { ca, other } = await certificates();
+    const { caCertPath, keychainPath } = await fixture(other);
+    let calls = 0;
+    const instance = adapter(caCertPath, keychainPath, async () => {
+      calls++;
+      return result();
+    });
+
+    await expect(instance.uninstall(ca, 'default')).rejects.toMatchObject({
+      code: 'STORE_WRITE_FAILED',
+      message: expect.stringContaining('does not match'),
+    });
+    expect(calls).toBe(0);
+  });
+
+  it('retains recovery data when the login keychain cannot be read for uninstall', async () => {
+    const { ca } = await certificates();
+    const { caCertPath, keychainPath } = await fixture(ca);
+    const instance = adapter(caCertPath, keychainPath, async () =>
+      result('', 1, 'read failed'),
+    );
+
+    await expect(instance.uninstall(ca, 'default')).rejects.toMatchObject({
+      code: 'STORE_WRITE_FAILED',
+      message: expect.stringContaining(
+        'Could not read the macOS login keychain',
+      ),
+    });
+  });
+
+  it('retains recovery data when exported trust settings are unreadable', async () => {
+    const { ca } = await certificates();
+    const { caCertPath, keychainPath } = await fixture(ca);
+    const instance = adapter(caCertPath, keychainPath, async (argv) => {
+      if (argv[1] === 'find-certificate') return result(ca);
+      if (argv[1] === 'trust-settings-export') {
+        const outputPath = argv.at(-1);
+        if (!outputPath) throw new Error('missing export path');
+        await writeFile(outputPath, 'not a plist at all');
+        return result();
+      }
+      throw new Error(`unexpected command ${argv[1]}`);
+    });
+
+    await expect(instance.uninstall(ca, 'default')).rejects.toMatchObject({
+      code: 'STORE_WRITE_FAILED',
+      message: expect.stringContaining('unreadable user trust settings'),
+    });
+  });
+
+  it('retains recovery data when the user trust setting survives removal', async () => {
+    const { ca } = await certificates();
+    const { caCertPath, keychainPath } = await fixture(ca);
+    const sha1 = new X509Certificate(ca).fingerprint
+      .replaceAll(':', '')
+      .toLowerCase();
+    const instance = adapter(caCertPath, keychainPath, async (argv) => {
+      if (argv[1] === 'find-certificate') return result(ca);
+      if (argv[1] === 'trust-settings-export') {
+        const outputPath = argv.at(-1);
+        if (!outputPath) throw new Error('missing export path');
+        await writeFile(
+          outputPath,
+          `<plist><dict><key>${sha1}</key><dict/></dict></plist>`,
+        );
+        return result();
+      }
+      if (argv[1] === 'remove-trusted-cert') return result();
+      throw new Error(`unexpected command ${argv[1]}`);
+    });
+
+    await expect(instance.uninstall(ca, 'default')).rejects.toMatchObject({
+      code: 'STORE_WRITE_FAILED',
+      message: expect.stringContaining('remains after removal'),
+    });
+  });
+
+  it('skips certificate deletion when the login keychain never held the CA', async () => {
+    const { ca, other } = await certificates();
+    const { caCertPath, keychainPath } = await fixture(ca);
+    const calls: string[][] = [];
+    const instance = adapter(caCertPath, keychainPath, async (argv) => {
+      calls.push(argv);
+      if (argv[1] === 'find-certificate') return result(other);
+      if (argv[1] === 'trust-settings-export')
+        return result('', 1, 'No Trust Settings were found');
+      throw new Error(`unexpected command ${argv[1]}`);
+    });
+
+    await expect(instance.uninstall(ca, 'default')).resolves.toBeUndefined();
+    expect(calls.map((argv) => argv[1])).toEqual([
+      'find-certificate',
+      'trust-settings-export',
+    ]);
   });
 });
