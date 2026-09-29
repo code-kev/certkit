@@ -44,7 +44,9 @@ export async function run(
       code?: string | number;
     };
     if (controller.signal.aborted)
-      throw new Error(`Command timed out after ${timeout} ms.`);
+      throw Object.assign(new Error(`Command timed out after ${timeout} ms.`), {
+        code: 'COMMAND_TIMEOUT',
+      });
     if (failure.code === 'ENOENT')
       throw new CertkitError(
         'UNSUPPORTED_PLATFORM',
@@ -65,15 +67,16 @@ export async function run(
 export async function resolveNssCertutil(env?: {
   CERTKIT_CERTUTIL?: string;
 }): Promise<string | null> {
-  if (env?.CERTKIT_CERTUTIL) {
+  const override = env ? env.CERTKIT_CERTUTIL : process.env['CERTKIT_CERTUTIL'];
+  if (override) {
     if (
       path.win32
-        .normalize(env.CERTKIT_CERTUTIL)
+        .normalize(override)
         .toLowerCase()
         .endsWith('\\windows\\system32\\certutil.exe')
     )
       return null;
-    return env.CERTKIT_CERTUTIL;
+    return override;
   }
 
   const candidates =

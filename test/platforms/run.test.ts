@@ -1,5 +1,5 @@
 import { inspect } from 'node:util';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { resolveNssCertutil, run } from '../../src/platforms/run.js';
 
 const platformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform');
@@ -143,6 +143,24 @@ describe('platform command runner', () => {
         CERTKIT_CERTUTIL: 'C:\\Windows\\System32\\certutil.exe',
       }),
     ).resolves.toBeNull();
+  });
+
+  it('reads the CERTKIT_CERTUTIL environment override when no argument is passed', async () => {
+    vi.stubEnv('CERTKIT_CERTUTIL', process.execPath);
+    try {
+      await expect(resolveNssCertutil()).resolves.toBe(process.execPath);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('rejects the Windows system certutil from the environment override', async () => {
+    vi.stubEnv('CERTKIT_CERTUTIL', 'C:\\Windows\\System32\\certutil.exe');
+    try {
+      await expect(resolveNssCertutil()).resolves.toBeNull();
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it('probes the NSS program-files locations on Windows', async () => {

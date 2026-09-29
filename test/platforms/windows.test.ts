@@ -2,7 +2,7 @@ import { X509Certificate } from 'node:crypto';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { mintCa } from '../../src/core/certgen.js';
 import type { Environment } from '../../src/platforms/detect.js';
 import type { RunResult } from '../../src/platforms/run.js';
@@ -51,10 +51,17 @@ function sha1(pem: string): string {
 
 function adapter(
   _caCertPath: string,
-  run: (argv: string[]) => Promise<RunResult>,
-  isInteractive: () => boolean = () => true,
+  run: (argv: string[], opts?: { timeoutMs?: number }) => Promise<RunResult>,
 ) {
-  return createWindowsAdapter({ run, isInteractive });
+  return createWindowsAdapter({ run });
+}
+
+function adapterOpts(
+  _caCertPath: string,
+  run: (argv: string[], opts?: { timeoutMs?: number }) => Promise<RunResult>,
+  consentTimeoutMs: number,
+) {
+  return createWindowsAdapter({ run, consentTimeoutMs });
 }
 
 const enumerateArgv = [
@@ -410,75 +417,65 @@ describe('Windows Root store adapter', () => {
     });
   });
 
-  it('refuses install in a non-interactive session without running certutil', async () => {
+  it('bounds the install consent wait and fails typed on timeout', async () => {
     const { ca } = await certificates();
     const { caCertPath } = await fixture(ca);
-    const calls: string[][] = [];
-    const instance = adapter(
+    const seen: Array<{ argv: string[]; timeoutMs?: number }> = [];
+    const instance = adapterOpts(
       caCertPath,
-      async (argv) => {
-        calls.push(argv);
-        return result();
+      async (argv, opts) => {
+        seen.push({ argv, timeoutMs: opts?.timeoutMs });
+        if (argv.includes('-addstore'))
+          throw Object.assign(new Error('Command timed out after 5 ms.'), {
+            code: 'COMMAND_TIMEOUT',
+          });
+        return result(`Cert Hash(sha1): ${sha1(ca)}`);
       },
-      () => false,
+      5,
     );
 
     await expect(instance.install(caCertPath, 'default')).rejects.toMatchObject(
       {
         code: 'STORE_WRITE_FAILED',
-        message: expect.stringContaining('interactive'),
+        message: expect.stringContaining('consent dialog'),
       },
     );
-    expect(calls).toEqual([]);
+    expect(seen.find(({ argv }) => argv.includes('-addstore'))?.timeoutMs).toBe(
+      5,
+    );
   });
 
-  it('refuses uninstall in a non-interactive session before any deletion', async () => {
+  it('bounds the uninstall consent wait and fails typed on timeout', async () => {
     const { ca } = await certificates();
     const { caCertPath } = await fixture(ca);
-    const calls: string[][] = [];
-    const instance = adapter(
+    let delstoreTimeout: number | undefined;
+    const instance = adapterOpts(
       caCertPath,
-      async (argv) => {
-        calls.push(argv);
-        return result(storeOutput(ca));
+      async (argv, opts) => {
+        if (argv[0] === 'powershell.exe') return result(storeOutput(ca));
+        if (argv.includes('-delstore')) {
+          delstoreTimeout = opts?.timeoutMs;
+          throw Object.assign(new Error('Command timed out after 5 ms.'), {
+            code: 'COMMAND_TIMEOUT',
+          });
+        }
+        return result();
       },
-      () => false,
+      5,
     );
 
     await expect(instance.uninstall(ca, 'default')).rejects.toMatchObject({
       code: 'STORE_WRITE_FAILED',
-      message: expect.stringContaining('interactive'),
+      message: expect.stringContaining('consent dialog'),
     });
-    expect(calls.some((argv) => argv.includes('-delstore'))).toBe(false);
+    expect(delstoreTimeout).toBe(5);
   });
 
-  it('default interactivity check treats SSH sessions as non-interactive even with TTYs', async () => {
-    const { ca } = await certificates();
-    const { caCertPath } = await fixture(ca);
-    const stdinTTY = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY');
-    const stdoutTTY = Object.getOwnPropertyDescriptor(process.stdout, 'isTTY');
-    Object.defineProperty(process.stdin, 'isTTY', { value: true });
-    Object.defineProperty(process.stdout, 'isTTY', { value: true });
-    vi.stubEnv('SSH_CONNECTION', '10.0.0.1 22 10.0.0.2 22');
-    try {
-      const instance = createWindowsAdapter({ run: async () => result() });
-      await expect(
-        instance.install(caCertPath, 'default'),
-      ).rejects.toMatchObject({ code: 'STORE_WRITE_FAILED' });
-    } finally {
-      vi.unstubAllEnvs();
-      if (stdinTTY) Object.defineProperty(process.stdin, 'isTTY', stdinTTY);
-      if (stdoutTTY) Object.defineProperty(process.stdout, 'isTTY', stdoutTTY);
-    }
-  });
-
-  it('treats uninstall of an absent CA as a no-op even when non-interactive', async () => {
+  it('treats uninstall of an absent CA as a no-op', async () => {
     const { ca, other } = await certificates();
     const { caCertPath } = await fixture(ca);
-    const instance = adapter(
-      caCertPath,
-      async () => result(storeOutput(other)),
-      () => false,
+    const instance = adapter(caCertPath, async () =>
+      result(storeOutput(other)),
     );
 
     await expect(instance.uninstall(ca, 'default')).resolves.toBeUndefined();

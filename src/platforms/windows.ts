@@ -23,29 +23,35 @@ export function windowsDeleteCertificateArgv(sha1: string): string[] {
   return ['certutil', '-user', '-delstore', 'Root', sha1];
 }
 
-type Command = (argv: string[]) => Promise<RunResult>;
+type Command = (
+  argv: string[],
+  opts?: { timeoutMs?: number },
+) => Promise<RunResult>;
 
 interface WindowsAdapterDependencies {
   run: Command;
-  // certutil pops a GUI consent dialog for add/delstore; in a non-interactive
-  // window station (CI, SSH, piped stdio) it hangs forever with no timeout.
-  // The default check is a proxy — TTYs plus no SSH markers — because Node
-  // cannot observe the window station; an SSH session with a PTY has TTYs
-  // but no visible desktop.
-  isInteractive?: () => boolean;
+  // certutil pops a GUI consent dialog for add/delstore and has no timeout
+  // of its own; where the dialog cannot be seen (CI, SSH, session 0) it hangs
+  // forever. The write is bounded instead of refused outright: an interactive
+  // session without TTYs (a scheduled task with a visible desktop) can still
+  // approve the dialog, and a truly headless session gets a typed error once
+  // the budget lapses instead of a silent hang.
+  consentTimeoutMs?: number;
 }
 
-function assertInteractive(isInteractive: (() => boolean) | undefined): void {
-  const viaSsh = ['SSH_CONNECTION', 'SSH_TTY'].some(
-    (name) => process.env[name],
+const DEFAULT_CONSENT_TIMEOUT_MS = 180_000;
+
+function isConsentTimeout(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    (error as { code?: string }).code === 'COMMAND_TIMEOUT'
   );
-  const interactive =
-    isInteractive?.() ??
-    Boolean(process.stdin.isTTY && process.stdout.isTTY && !viaSsh);
-  if (!interactive)
-    throw writeFailure(
-      'Windows requires interactive consent to modify the Root store, but this session is non-interactive; re-run in an interactive terminal (not CI, SSH, or a pipe).',
-    );
+}
+
+function consentTimeoutFailure(): CertkitError {
+  return writeFailure(
+    'Windows showed a consent dialog that was not approved in time; this session may not be able to display it. Approve the dialog in the interactive session, or re-run from an interactive terminal (not CI, SSH, or a pipe).',
+  );
 }
 
 function certificateHashes(pem: string): { sha256: string; sha1: string } {
@@ -108,7 +114,9 @@ function assertDefaultTarget(target: string): void {
 export function createWindowsAdapter(
   dependencies: WindowsAdapterDependencies,
 ): StoreAdapter {
-  const { run, isInteractive } = dependencies;
+  const { run } = dependencies;
+  const consentTimeoutMs =
+    dependencies.consentTimeoutMs ?? DEFAULT_CONSENT_TIMEOUT_MS;
   return {
     id: 'windows-root',
 
@@ -169,10 +177,11 @@ export function createWindowsAdapter(
 
     async install(certPath, target) {
       assertDefaultTarget(target);
-      assertInteractive(isInteractive);
       try {
         const { sha1 } = certificateHashes(await readFile(certPath, 'utf8'));
-        const added = await run(windowsInstallArgv(certPath));
+        const added = await run(windowsInstallArgv(certPath), {
+          timeoutMs: consentTimeoutMs,
+        });
         if (added.code !== 0)
           throw writeFailure(
             'Could not add the CA to the current-user Windows Root store.',
@@ -196,6 +205,7 @@ export function createWindowsAdapter(
         return { state: 'verified' };
       } catch (error) {
         if (error instanceof CertkitError) throw error;
+        if (isConsentTimeout(error)) throw consentTimeoutFailure();
         throw writeFailure(
           'Could not verify the current-user Windows Root store install; rerun `certkit install`.',
         );
@@ -216,8 +226,9 @@ export function createWindowsAdapter(
         );
         if (!match) return;
 
-        assertInteractive(isInteractive);
-        const removed = await run(windowsDeleteCertificateArgv(match.sha1));
+        const removed = await run(windowsDeleteCertificateArgv(match.sha1), {
+          timeoutMs: consentTimeoutMs,
+        });
         if (removed.code !== 0)
           throw writeFailure(
             'Could not remove the CA from the current-user Windows Root store; CA recovery data was retained.',
@@ -232,6 +243,7 @@ export function createWindowsAdapter(
           );
       } catch (error) {
         if (error instanceof CertkitError) throw error;
+        if (isConsentTimeout(error)) throw consentTimeoutFailure();
         throw writeFailure(
           'Could not complete Windows CA removal; CA recovery data was retained.',
         );
