@@ -216,7 +216,18 @@ export async function detect(probes: DetectProbes = {}): Promise<Environment> {
         );
     for (const target of [
       chromiumProspect,
-      pathApi.join(home, 'snap', 'chromium', 'current', '.pki', 'nssdb'),
+      // Snap Chromium keeps its NSS DB under the revision's XDG data dir
+      // (current is a symlink to the active revision).
+      pathApi.join(
+        home,
+        'snap',
+        'chromium',
+        'current',
+        '.local',
+        'share',
+        'pki',
+        'nssdb',
+      ),
       '/etc/pki/nssdb',
     ]) {
       if (await hasNssDb(fs, target)) targets.push(target);

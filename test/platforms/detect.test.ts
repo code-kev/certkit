@@ -229,7 +229,9 @@ describe('environment detection', () => {
       'snap',
       'chromium',
       'current',
-      '.pki',
+      '.local',
+      'share',
+      'pki',
       'nssdb',
     );
     expect(
