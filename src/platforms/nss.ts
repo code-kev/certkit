@@ -25,9 +25,7 @@ interface NssAdapterDependencies {
 
 const defaultFs: NssAdapterFs = {
   mkdir: (path, options) => mkdir(path, options),
-  hasDatabaseFile: (target) =>
-    existsSync(join(target, 'cert9.db')) ||
-    existsSync(join(target, 'cert8.db')),
+  hasDatabaseFile: (target) => existsSync(join(target, 'cert9.db')),
 };
 
 const DEFAULT_TARGET = 'default';

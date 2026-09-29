@@ -54,9 +54,13 @@ async function isDirectory(fs: ProbeFs, target: string): Promise<boolean> {
 }
 
 async function hasNssDb(fs: ProbeFs, target: string): Promise<boolean> {
+  return exists(fs, path.join(target, 'cert9.db'));
+}
+
+async function legacyOnlyNssDb(fs: ProbeFs, target: string): Promise<boolean> {
   return (
-    (await exists(fs, path.join(target, 'cert9.db'))) ||
-    exists(fs, path.join(target, 'cert8.db'))
+    (await exists(fs, path.join(target, 'cert8.db'))) &&
+    !(await hasNssDb(fs, target))
   );
 }
 
@@ -208,14 +212,16 @@ export async function detect(probes: DetectProbes = {}): Promise<Environment> {
   if (os === 'linux') {
     const legacy = pathApi.join(home, '.pki', 'nssdb');
     chromiumProspect = (await isDirectory(fs, legacy))
-      ? legacy
+      ? (await legacyOnlyNssDb(fs, legacy))
+        ? undefined
+        : legacy
       : pathApi.join(
           process.env['XDG_DATA_HOME'] || pathApi.join(home, '.local', 'share'),
           'pki',
           'nssdb',
         );
     for (const target of [
-      chromiumProspect,
+      ...(chromiumProspect ? [chromiumProspect] : []),
       // Snap Chromium keeps its NSS DB under the revision's XDG data dir
       // (current is a symlink to the active revision).
       pathApi.join(
@@ -243,7 +249,11 @@ export async function detect(probes: DetectProbes = {}): Promise<Environment> {
     )
       installTargets.push(target);
   }
-  if (chromiumProspect && !uniqueTargets.includes(chromiumProspect))
+  if (
+    chromiumProspect &&
+    !uniqueTargets.includes(chromiumProspect) &&
+    !(await legacyOnlyNssDb(fs, chromiumProspect))
+  )
     installTargets.push(chromiumProspect);
   stores.push({
     store: 'nss',

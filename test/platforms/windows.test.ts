@@ -127,7 +127,7 @@ describe('Windows Root store adapter', () => {
     ]);
   });
 
-  it('installs without elevation and verifies the SHA-1 thumbprint by read-back', async () => {
+  it('installs without elevation and verifies the exact certificate by read-back', async () => {
     const { ca } = await certificates();
     const { caCertPath } = await fixture(ca);
     const calls: string[][] = [];
@@ -135,9 +135,7 @@ describe('Windows Root store adapter', () => {
       calls.push(argv);
       return argv.includes('-addstore')
         ? result('Certificate added to store.')
-        : result(
-            `================ Certificate ================\r\nCert Hash(sha1): ${sha1(ca)}\r\nCertUtil: -store command completed successfully.`,
-          );
+        : result(storeOutput(ca));
     });
 
     await expect(instance.install(caCertPath, 'default')).resolves.toEqual({
@@ -145,7 +143,26 @@ describe('Windows Root store adapter', () => {
     });
     expect(calls).toEqual([
       ['certutil', '-user', '-addstore', 'Root', caCertPath],
-      ['certutil', '-user', '-store', 'Root', sha1(ca)],
+      enumerateArgv,
+    ]);
+  });
+
+  it('verifies an install without parsing localized certutil output', async () => {
+    const { ca } = await certificates();
+    const { caCertPath } = await fixture(ca);
+    const calls: string[][] = [];
+    const instance = adapter(caCertPath, async (argv) => {
+      calls.push(argv);
+      if (argv[0] === 'powershell.exe') return result(storeOutput(ca));
+      return result('Der Vorgang wurde erfolgreich abgeschlossen.');
+    });
+
+    await expect(instance.install(caCertPath, 'default')).resolves.toEqual({
+      state: 'verified',
+    });
+    expect(calls).toEqual([
+      ['certutil', '-user', '-addstore', 'Root', caCertPath],
+      enumerateArgv,
     ]);
   });
 
@@ -174,9 +191,7 @@ describe('Windows Root store adapter', () => {
     const calls: string[][] = [];
     const instance = adapter(caCertPath, async (argv) => {
       calls.push(argv);
-      return argv.includes('-addstore')
-        ? result()
-        : result(`Cert Hash(sha1): ${sha1(other)}`);
+      return argv.includes('-addstore') ? result() : result(storeOutput(other));
     });
 
     await expect(
@@ -184,7 +199,7 @@ describe('Windows Root store adapter', () => {
     ).resolves.toMatchObject({
       state: 'inconclusive',
     });
-    expect(calls[1]).toEqual(['certutil', '-user', '-store', 'Root', sha1(ca)]);
+    expect(calls[1]).toEqual(enumerateArgv);
   });
 
   it('uninstalls only the SHA-256 matched certificate using its SHA-1 thumbprint', async () => {

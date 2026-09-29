@@ -96,12 +96,6 @@ async function enumerateRoot(run: Command) {
     : undefined;
 }
 
-function readbackContainsThumbprint(output: string, sha1: string): boolean {
-  return [
-    ...output.matchAll(/^\s*Cert Hash\(sha1\):\s*([\da-f: ]+)\s*$/gim),
-  ].some(([, value]) => value?.replaceAll(/[:\s]/g, '').toUpperCase() === sha1);
-}
-
 function writeFailure(message: string): CertkitError {
   return new CertkitError('STORE_WRITE_FAILED', message);
 }
@@ -178,7 +172,7 @@ export function createWindowsAdapter(
     async install(certPath, target) {
       assertDefaultTarget(target);
       try {
-        const { sha1 } = certificateHashes(await readFile(certPath, 'utf8'));
+        const { sha256 } = certificateHashes(await readFile(certPath, 'utf8'));
         const added = await run(windowsInstallArgv(certPath), {
           timeoutMs: consentTimeoutMs,
         });
@@ -186,17 +180,8 @@ export function createWindowsAdapter(
           throw writeFailure(
             'Could not add the CA to the current-user Windows Root store.',
           );
-        const readback = await run([
-          'certutil',
-          '-user',
-          '-store',
-          'Root',
-          sha1,
-        ]).catch(() => undefined);
-        if (
-          readback?.code !== 0 ||
-          !readbackContainsThumbprint(readback.stdout, sha1)
-        )
+        const readback = await enumerateRoot(run).catch(() => undefined);
+        if (!readback?.some((certificate) => certificate.sha256 === sha256))
           return {
             state: 'inconclusive',
             detail:

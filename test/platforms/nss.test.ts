@@ -575,7 +575,7 @@ describe('NSS store adapter edge cases', () => {
     await expect(
       instance.inspectInstalled(ca, join(dir, 'empty')),
     ).resolves.toBe('absent');
-    expect(calls).toHaveLength(2);
+    expect(calls).toEqual([[certutil, '-L', '-d', `sql:${cert9Dir}`]]);
 
     await expect(instance.install(caPath, target)).resolves.toEqual({
       state: 'verified',

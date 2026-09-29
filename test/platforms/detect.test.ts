@@ -125,6 +125,15 @@ describe('environment detection', () => {
     });
   });
 
+  it('does not target a legacy cert8-only Chromium directory for SQL writes', async () => {
+    const legacy = path.join(home, '.pki', 'nssdb');
+    const result = await detector({
+      files: { [path.join(legacy, 'cert8.db')]: '' },
+    }).detect();
+    expect(nss(result)?.targets).not.toContain(legacy);
+    expect(nss(result)?.installTargets).toEqual([]);
+  });
+
   it('keeps read-only Firefox DBs as status targets only', async () => {
     const base = path.join(home, '.mozilla', 'firefox');
     const profile = path.join(base, 'readonly.default');
@@ -137,6 +146,20 @@ describe('environment detection', () => {
       readOnly: [profile],
     }).detect();
     expect(nss(result)?.targets).toContain(profile);
+    expect(nss(result)?.installTargets).not.toContain(profile);
+  });
+
+  it('does not offer legacy cert8-only Firefox profiles to the SQL adapter', async () => {
+    const base = path.join(home, '.mozilla', 'firefox');
+    const profile = path.join(base, 'legacy.default');
+    const result = await detector({
+      files: {
+        [path.join(base, 'profiles.ini')]:
+          '[Profile0]\nIsRelative=1\nPath=legacy.default\n',
+        [path.join(profile, 'cert8.db')]: '',
+      },
+    }).detect();
+    expect(nss(result)?.targets).not.toContain(profile);
     expect(nss(result)?.installTargets).not.toContain(profile);
   });
 
