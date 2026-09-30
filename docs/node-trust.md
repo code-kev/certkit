@@ -24,7 +24,7 @@ $env:NODE_OPTIONS = '--use-system-ca'
 node app.js
 ```
 
-The Node 22.15 CLI documentation's version-history table lists non-Windows/non-macOS support starting at 23.9.0, but that table misses the v22.15 backport. The v22.15 source registers `--use-system-ca` without a platform restriction and loads OpenSSL's system CA paths on non-Windows, non-macOS platforms when the flag is enabled: [`node_options.cc`](https://github.com/nodejs/node/blob/v22.15.0/src/node_options.cc#L1092-L1103), [`crypto_context.cc`](https://github.com/nodejs/node/blob/v22.15.0/src/crypto/crypto_context.cc#L702-L713), [`crypto_context.cc` CA selection](https://github.com/nodejs/node/blob/v22.15.0/src/crypto/crypto_context.cc#L743-L760).
+The Node 22.15 CLI documentation's version-history table lists non-Windows/non-macOS support starting at 23.9.0, but that table misses the v22.15 backport. The v22.15 source registers `--use-system-ca` without a platform restriction and loads OpenSSL's system CA paths on non-Windows, non-macOS platforms when the flag is enabled: [`node_options.cc`](https://github.com/nodejs/node/blob/v22.15.0/src/node_options.cc#L1151-L1154), [`crypto_context.cc`](https://github.com/nodejs/node/blob/v22.15.0/src/crypto/crypto_context.cc#L767-L777), [`crypto_context.cc` CA selection](https://github.com/nodejs/node/blob/v22.15.0/src/crypto/crypto_context.cc#L852-L855).
 
 ## Add certkit's CA explicitly
 

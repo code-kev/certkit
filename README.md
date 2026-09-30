@@ -2,7 +2,7 @@
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/certkit-hero-dark.svg">
     <source media="(prefers-color-scheme: light)" srcset="assets/certkit-hero-light.svg">
-    <img src="assets/certkit-hero-light.svg" alt="certkit — trusted local HTTPS for development" width="900">
+    <img src="assets/certkit-hero-light.svg" alt="certkit — local certificate tools for HTTPS development" width="900">
   </picture>
 </p>
 
