@@ -1,0 +1,65 @@
+name: NSS diagnostics
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/nss-diagnostics.yml
+
+permissions: {}
+
+concurrency:
+  group: nss-diagnostics-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compare:
+    name: NSS diagnostic (${{ matrix.environment }})
+    runs-on: windows-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - environment: UCRT64
+            directory: ucrt64
+            package: mingw-w64-ucrt-x86_64-nss
+          - environment: CLANG64
+            directory: clang64
+            package: mingw-w64-clang-x86_64-nss
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: '24'
+      - run: pnpm install --frozen-lockfile
+        shell: pwsh
+      - id: msys2
+        uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
+        with:
+          msystem: ${{ matrix.environment }}
+          update: true
+          cache: false
+          install: ${{ matrix.package }}
+      - name: Compare fresh NSS certificate databases
+        shell: pwsh
+        env:
+          MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}
+          NSS_DIRECTORY: ${{ matrix.directory }}
+        run: |
+          $nssBin = Join-Path $env:MSYS2_LOCATION "$env:NSS_DIRECTORY\bin"
+          $env:PATH = "$nssBin;$env:PATH"
+          $env:CERTKIT_CERTUTIL = Join-Path $nssBin 'certutil.exe'
+          if (-not (Test-Path $env:CERTKIT_CERTUTIL)) { throw 'NSS certutil missing' }
+          for ($iteration = 1; $iteration -le 30; $iteration++) {
+            Write-Host "NSS corpus iteration $iteration / 30"
+            pnpm vitest run test/verifiers/verifiers.test.ts -t 'NSS certutil oracle'
+            if ($LASTEXITCODE -ne 0) { throw "NSS corpus failed at iteration $iteration" }
+          }
