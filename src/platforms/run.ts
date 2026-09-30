@@ -11,6 +11,19 @@ const privateKey =
 const redact = (value: string): string =>
   value.replace(privateKey, '[REDACTED]');
 
+export function commandEnvironment(
+  command: string,
+): NodeJS.ProcessEnv | undefined {
+  if (path.win32.basename(command).toLowerCase() !== 'powershell.exe')
+    return undefined;
+  // WinPS 5.1 must rebuild its module path when launched through pwsh 7/Node.
+  const env = { ...process.env };
+  for (const key of Object.keys(env)) {
+    if (key.toLowerCase() === 'psmodulepath') delete env[key];
+  }
+  return env;
+}
+
 export interface RunResult {
   code: number;
   stdout: string;
@@ -35,6 +48,7 @@ export async function run(
       encoding: 'utf8',
       windowsHide: true,
       signal: controller.signal,
+      env: commandEnvironment(argv[0]),
     });
     return { code: 0, stdout: redact(stdout), stderr: redact(stderr) };
   } catch (error) {

@@ -5,7 +5,10 @@ import {
 } from '../../src/platforms/fsguard.js';
 
 const mocks = vi.hoisted(() => ({ execFileSync: vi.fn() }));
-vi.mock('node:child_process', () => ({ execFileSync: mocks.execFileSync }));
+vi.mock('node:child_process', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('node:child_process')>()),
+  execFileSync: mocks.execFileSync,
+}));
 
 const path = 'C:\\Users\\test\\AppData\\Local\\certkit';
 const whoamiCsv = '"DOMAIN\\test","S-1-5-21-1-2-3-1001"';
@@ -22,6 +25,36 @@ function runner(aclOutput: string, whoami: string = whoamiCsv): CommandRunner {
 }
 
 describe('Windows filesystem guard', () => {
+  it('reads ACLs without inheriting PowerShell 7 module paths', () => {
+    vi.stubEnv('PSModulePath', 'incompatible-powershell-7-modules');
+    vi.stubEnv('CERTKIT_TEST_SENTINEL', 'preserved');
+    mocks.execFileSync.mockImplementation(
+      (
+        command: string,
+        _args: unknown,
+        options: { env?: NodeJS.ProcessEnv },
+      ) => {
+        if (command.endsWith('\\whoami.exe')) return whoamiCsv;
+        const env = options.env ?? process.env;
+        if (
+          Object.keys(env).some((key) => key.toLowerCase() === 'psmodulepath')
+        )
+          throw new Error('CouldNotAutoloadMatchingModule');
+        expect(env['CERTKIT_TEST_SENTINEL']).toBe('preserved');
+        return selfSid;
+      },
+    );
+    try {
+      expect(() =>
+        createWindowsFsGuard().assertProtectedDirectory(path),
+      ).not.toThrow();
+      expect(process.env['PSModulePath']).toBe(
+        'incompatible-powershell-7-modules',
+      );
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
   it.each(['C:\\Windows', ''])(
     'uses native Windows executables with SystemRoot %j despite a colliding PATH and wraps failures',
     (systemRoot) => {

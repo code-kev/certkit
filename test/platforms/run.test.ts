@@ -1,3 +1,6 @@
+import { chmod, copyFile, mkdtemp, rm, symlink } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { inspect } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { resolveNssCertutil, run } from '../../src/platforms/run.js';
@@ -17,6 +20,37 @@ afterEach(() => {
 });
 
 describe('platform command runner', () => {
+  it.each(['PSModulePath', 'pSmOdUlEpAtH'])(
+    'isolates Windows PowerShell module lookup from inherited %s without changing the parent',
+    async (key) => {
+      const root = await mkdtemp(join(tmpdir(), 'certkit-powershell-env-'));
+      const executable = join(root, 'PoWeRsHeLl.ExE');
+      if (process.platform === 'win32') {
+        await copyFile(process.execPath, executable);
+        await chmod(executable, 0o755);
+      } else {
+        await symlink(process.execPath, executable);
+      }
+      vi.stubEnv(key, 'incompatible-powershell-7-modules');
+      vi.stubEnv('CERTKIT_TEST_SENTINEL', 'preserved');
+      const probe =
+        'process.stdout.write(JSON.stringify({ modules: Object.keys(process.env).filter(key => key.toLowerCase() === "psmodulepath"), sentinel: process.env.CERTKIT_TEST_SENTINEL }))';
+      try {
+        const result = await run([executable, '-e', probe]);
+        expect(result.code).toBe(0);
+        expect(JSON.parse(result.stdout)).toEqual({
+          modules: [],
+          sentinel: 'preserved',
+        });
+        expect(process.env[key]).toBe('incompatible-powershell-7-modules');
+        const ordinary = await run([process.execPath, '-e', probe]);
+        expect(JSON.parse(ordinary.stdout).modules.length).toBeGreaterThan(0);
+      } finally {
+        vi.unstubAllEnvs();
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
   it('requires a command', async () => {
     await expect(run([])).rejects.toMatchObject({
       code: 'INVALID_OPTIONS',

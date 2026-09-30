@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import type { FsGuard } from '../core/cadir.js';
 import { CertkitError } from '../core/errors.js';
+import { commandEnvironment } from './run.js';
 
 export type CommandRunner = (
   command: string,
@@ -20,9 +21,11 @@ function run(command: string, args: readonly string[]): string {
       ? path.win32.join(system32, 'WindowsPowerShell', 'v1.0', command)
       : path.win32.join(system32, `${command}.exe`);
   try {
+    const env = commandEnvironment(executable);
     return execFileSync(executable, [...args], {
       encoding: 'utf8',
       windowsHide: true,
+      ...(env ? { env } : {}),
     });
   } catch (error) {
     throw new CertkitError(
