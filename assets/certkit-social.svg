@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-labelledby="title desc">
+  <title id="title">certkit — trusted local HTTPS</title>
+  <desc id="desc">JavaScript local certificate authority, CLI, and Vite plugin.</desc>
+  <defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#132341"/><stop offset="1" stop-color="#234b83"/></linearGradient></defs>
+  <rect width="1280" height="640" fill="url(#bg)"/>
+  <circle cx="1060" cy="120" r="220" fill="#3a6f9f" opacity=".22"/>
+  <circle cx="170" cy="610" r="270" fill="#51b89b" opacity=".10"/>
+  <g transform="translate(180 195)">
+    <path d="M115 0 220 41v94c0 81-47 130-105 162C57 265 10 216 10 135V41L115 0Z" fill="#1c3154" stroke="#b7c8ff" stroke-width="12"/>
+    <path d="m70 150 32 32 65-72" fill="none" stroke="#72e0bd" stroke-linecap="round" stroke-linejoin="round" stroke-width="20"/>
+  </g>
+  <text x="480" y="295" fill="#fff" font-family="ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif" font-size="118" font-weight="750" letter-spacing="-5">certkit</text>
+  <text x="490" y="378" fill="#e0e9fb" font-family="ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif" font-size="35">Trusted local HTTPS for development</text>
+  <text x="494" y="446" fill="#b8c9e9" font-family="ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif" font-size="24">JavaScript · CLI · Vite</text>
+  <text x="494" y="524" fill="#90a9d1" font-family="ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif" font-size="19">No certkit runtime binary download. No OpenSSL executable.</text>
+</svg>

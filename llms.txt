@@ -1,0 +1,12 @@
+# certkit
+
+> Trusted local HTTPS certificates as a JavaScript library, CLI, and Vite plugin.
+
+- [README](README.md): install, quick start, platform limits, comparison
+- [CLI reference](docs/cli.md): commands, JSON output, exit codes
+- [Trust matrix](docs/trust-matrix.md): per-platform verification evidence and limits
+- [Node trust](docs/node-trust.md): system CA and CI/container recipes
+- [Coming from devcert](docs/devcert-migration.md): coexistence and cleanup
+- [Security policy](SECURITY.md): private vulnerability reporting
+- [Contributing](CONTRIBUTING.md): development and pull request guidance
+- [Release guide](docs/releasing.md): maintainer-only publication process

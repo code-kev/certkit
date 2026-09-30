@@ -1,0 +1,55 @@
+name: Bug report
+description: Report a reproducible certkit problem
+title: "bug: "
+labels: ["type:bug", "status:needs-repro"]
+body:
+  - type: markdown
+    attributes:
+      value: "Do not include private keys, credentials, or unredacted personal paths. For security issues, use private vulnerability reporting."
+  - type: input
+    id: version
+    attributes:
+      label: certkit version or commit
+      placeholder: "version or 40-character commit"
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system and version
+    validations:
+      required: true
+  - type: input
+    id: browser
+    attributes:
+      label: Browser and version (if relevant)
+  - type: dropdown
+    id: store
+    attributes:
+      label: Affected trust store
+      options:
+        - macOS login keychain
+        - Windows current-user Root store
+        - Linux system store
+        - NSS database (Firefox/Chromium)
+        - Unknown / not applicable
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Include the exact command and a minimal example.
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: Expected and observed result
+      validations:
+        required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Sanitized output
+      description: Remove usernames, private paths, certificate contents, and secrets.
