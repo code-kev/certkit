@@ -48,7 +48,7 @@ jobs:
           update: true
           cache: false
           install: ${{ matrix.package }}
-      - name: Compare fresh NSS certificate databases
+      - name: Compare NSS under full-suite load
         shell: pwsh
         env:
           MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}
@@ -58,8 +58,24 @@ jobs:
           $env:PATH = "$nssBin;$env:PATH"
           $env:CERTKIT_CERTUTIL = Join-Path $nssBin 'certutil.exe'
           if (-not (Test-Path $env:CERTKIT_CERTUTIL)) { throw 'NSS certutil missing' }
-          for ($iteration = 1; $iteration -le 30; $iteration++) {
-            Write-Host "NSS corpus iteration $iteration / 30"
-            pnpm vitest run test/verifiers/verifiers.test.ts -t 'NSS certutil oracle'
-            if ($LASTEXITCODE -ne 0) { throw "NSS corpus failed at iteration $iteration" }
+          pnpm build
+          if ($LASTEXITCODE -ne 0) { throw 'Diagnostic build failed' }
+          pnpm coverage
+          if ($LASTEXITCODE -ne 0) { throw 'Full-suite NSS diagnostic failed' }
+      - name: Report NSS native fault metadata
+        if: failure()
+        shell: pwsh
+        env:
+          MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}
+          NSS_DIRECTORY: ${{ matrix.directory }}
+        run: |
+          $expected = Join-Path $env:MSYS2_LOCATION "$env:NSS_DIRECTORY\bin\certutil.exe"
+          $events = Get-WinEvent -FilterHashtable @{ LogName = 'Application'; Id = 1000; StartTime = (Get-Date).AddMinutes(-15) } -MaxEvents 20 -ErrorAction SilentlyContinue
+          foreach ($event in $events) {
+            $values = @{}
+            foreach ($item in ([xml]$event.ToXml()).Event.EventData.Data) { $values[$item.Name] = $item.InnerText }
+            if ($values['AppPath'] -ine $expected) { continue }
+            foreach ($field in @('AppPath', 'AppVersion', 'ModuleName', 'ModulePath', 'ModuleVersion', 'ExceptionCode', 'FaultingOffset', 'ProcessId')) {
+              Write-Host "$field=$($values[$field])"
+            }
           }
