@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-labelledby="title desc">
+  <title id="title">certkit — local HTTPS certificates</title>
+  <desc id="desc">JavaScript certificate tools for local development with a CLI and Vite plugin.</desc>
+  <rect width="1280" height="640" fill="#17181a"/>
+  <text x="88" y="126" fill="#a5a39c" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="18" letter-spacing="2">LOCAL DEVELOPMENT / HTTPS</text>
+  <text x="82" y="330" fill="#d8d6d0" font-family="Georgia, 'Times New Roman', serif" font-size="174" letter-spacing="-10">certkit</text>
+  <path d="M90 382H1190" stroke="#4a4b51" stroke-width="1"/>
+  <text x="92" y="444" fill="#d8d6d0" font-family="Georgia, 'Times New Roman', serif" font-size="36">Local certificate tools for JavaScript.</text>
+  <text x="94" y="510" fill="#a5a39c" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="20" letter-spacing="1">LIBRARY / CLI / VITE PLUGIN</text>
+  <text x="94" y="578" fill="#8f8d86" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="16">NO CERTKIT RUNTIME BINARY DOWNLOAD</text>
+</svg>

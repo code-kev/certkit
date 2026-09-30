@@ -3,6 +3,10 @@
   "version": "0.0.0",
   "description": "Trusted local HTTPS development certificates",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/code-kev/certkit.git"
+  },
   "type": "module",
   "engines": {
     "node": ">=22.15.0"

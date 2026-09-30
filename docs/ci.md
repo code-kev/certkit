@@ -3,8 +3,13 @@
 Hosted CI runs coverage on Ubuntu, macOS, and Windows with Node 22.15.0 and
 Node 24. It provisions and checks OpenSSL and NSS tools; macOS also checks
 `security`. Ubuntu runs a real system trust install, acceptance, removal, and
-rejection test. Windows trust mutations are covered by fixtures in hosted CI
-and by separate interactive machine checks.
+rejection test. Windows fixture tests run in hosted CI. The interactive W1
+gate also passed a non-admin current-user trust cycle on Windows Server 2025
+console with Chrome 154.0.8037.58. A separate Server 2025 RDP Firefox/Chrome
+acceptance run passed installation and browser checks, but its final uninstall
+readback and rejection check remain pending. These machine results do not
+establish coverage for other Windows releases or locales; see the
+[trust matrix](trust-matrix.md).
 
 ## macOS acceptance gate
 

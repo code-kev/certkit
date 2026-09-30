@@ -35,6 +35,7 @@ jobs:
       - run: node test/check-boundaries.negative.mjs
       - run: node test/check-source-policy.negative.mjs
       - run: node test/check-changeset.negative.mjs
+      - run: node test/release-gates.negative.mjs
   typecheck:
     name: typecheck
     runs-on: ubuntu-latest

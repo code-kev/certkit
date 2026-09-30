@@ -1,0 +1,23 @@
+name: Feature request
+description: Describe a use case that certkit does not support
+title: "feature: "
+labels: ["type:feature"]
+body:
+  - type: textarea
+    id: need
+    attributes:
+      label: What are you trying to do?
+      description: Describe the task and the constraint that blocks it today.
+    validations:
+      required: true
+  - type: textarea
+    id: current
+    attributes:
+      label: What do you do today?
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include OS, version, browser/runtime, and trust store if relevant.
