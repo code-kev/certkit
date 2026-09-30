@@ -2,7 +2,7 @@
 
 Releases use `.github/workflows/release.yml`. The workflow validates that the selected commit is on `main`, its tag matches the package version, and the `required`, `test`, `build`, `lint`, and `typecheck` checks succeeded on that exact commit from GitHub Actions. Missing, pending, skipped, failed, or unavailable checks stop the run. `pr-title` and PR-scoped `dependency-review` are explicit exemptions.
 
-Before a tag release can publish, configure the `npm-publish` GitHub environment with at least one required reviewer, enable immutable releases for the repository, and configure npm trusted publishing for this workflow and environment. The package `repository` object must be the canonical `git+https://github.com/code-kev/certkit.git` URL; the source gate verifies it. Store a fine-grained `RELEASE_SETTINGS_TOKEN` as an `npm-publish` environment secret with repository `Administration: read` only; GitHub does not expose the immutable-release setting to the workflow's `GITHUB_TOKEN`. The workflow uses that token only for the immutable-release settings read, uses `GITHUB_TOKEN` for environment and release APIs, and stops if the token, reviewer rule, or immutable setting is unavailable. It also checks `immutable: true` on an already-published GitHub Release. These owner-side settings and the read-only secret are pending setup. Do not create or change them as part of a release run.
+Before a tag release can publish, configure the `npm-publish` GitHub environment with at least one required reviewer, enable immutable releases for the repository, and configure npm trusted publishing for this workflow and environment. The package `repository` object must be the canonical `git+https://github.com/code-kev/certkit.git` URL; the source gate verifies it. Store a fine-grained `RELEASE_SETTINGS_TOKEN` as an `npm-publish` environment secret with repository `Administration: read` only; GitHub does not expose the immutable-release setting to the workflow's `GITHUB_TOKEN`. The workflow uses that token only for the immutable-release settings read, uses `GITHUB_TOKEN` for environment and release APIs, and stops if the token, reviewer rule, or immutable setting is unavailable. It also checks `immutable: true` on an already-published GitHub Release.
 
 ## First publication
 
@@ -15,7 +15,13 @@ The initial version starts before a tag exists:
 5. Tag the same checked commit `vVERSION` and push the tag. The workflow finds the bootstrap artifact by version and selected source SHA, even if `main` advanced after dispatch. It verifies the manifest's full SHA and version, checks the digest and npm registry integrity, skips npm publish, and creates the GitHub release metadata. The first version has no npm OIDC provenance; the release records that fact. Bind the npm trusted publisher before the next release.
 6. Revoke any temporary credential used for the manual publish.
 
-The workflow never stores an npm token. The bootstrap dispatch stops before the OIDC publish job. Until the release-day bootstrap rehearsal is completed, this path is prepared but unrehearsed.
+The workflow never stores an npm token. The bootstrap dispatch stops before the OIDC publish job.
+
+For the first beta, `npm publish --tag beta` also assigns npm's required `latest` dist-tag. Until a stable version is published, unqualified `npm install certkit` therefore resolves the beta; `npm install certkit@beta` selects it explicitly. npm requires a `latest` dist-tag for every package and rejects attempts to remove it.
+
+## Recovering published release metadata
+
+If npm already has the version but the tag workflow failed before completing GitHub release metadata, run this workflow from `main` with the original source commit SHA and `finalize_published_release` enabled. The workflow requires that version to be published, the existing `vVERSION` tag to point to that exact source commit, the original tested tarball artifact and registry SRI to match, and the protected `npm-publish` reviewer gate to pass. It reuses and smoke-tests the original tarball, verifies its existing GitHub attestation, attests the generated SBOM, and completes the draft GitHub release. It does not build, repack, retag, or publish the package. The first beta was published interactively and has no npm OIDC provenance; GitHub artifact attestations do not change that.
 
 ## Later releases and retries
 
