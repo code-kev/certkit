@@ -105,6 +105,7 @@ jobs:
                 const lines = `${result.stdout ?? ''}\n${result.stderr ?? ''}`.split(/\r?\n/);
                 const exception = lines.filter(line => /^\s*Exception(?:Address|Code):/.test(line));
                 const frames = lines.filter(line => /^\s*[0-9a-f]{2}\s+[0-9a-f`]+\s+[0-9a-f`]+\s+\S/i.test(line)).slice(0, 8);
+                if (image === 'certkit-nss-av.exe') console.log(`Synthetic dump parse: exceptionFields=${exception.length}, avCode=${exception.some(line => /ExceptionCode:\s*c0000005/i.test(line))}, frameCandidates=${lines.filter(line => /^\s*[0-9a-f]{1,2}\s+/i.test(line)).length}, selectedFrames=${frames.length}`);
                 if (!exception.some(line => /ExceptionCode:\s*c0000005/i.test(line)) || !frames.length) throw new Error('Native AV exception/stack missing from decoded minidump');
                 console.log(`Original native AV captured for ${image}`);
                 console.log([...exception, ...frames].join('\n'));
