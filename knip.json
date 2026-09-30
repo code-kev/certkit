@@ -1,5 +1,5 @@
 {
   "$schema": "https://unpkg.com/knip@6.37.0/schema.json",
-  "ignoreBinaries": ["openssl"],
+  "ignoreBinaries": ["openssl", "certkit"],
   "project": ["src/**/*.ts", "*.config.ts"]
 }
