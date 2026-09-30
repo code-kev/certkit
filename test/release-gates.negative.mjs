@@ -10,6 +10,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { checkConsumerTree } from '../scripts/check-deps.mjs';
 import {
   assertEgressDenied,
@@ -67,6 +68,85 @@ const dispatchGuardStep = releaseWorkflow.slice(
   dispatchGuardStart,
   dispatchGuardEnd,
 );
+const publishedReleaseStepStart = releaseWorkflow.indexOf(
+  '- name: Verify published release immutability and assets',
+);
+assert.notEqual(publishedReleaseStepStart, -1);
+const publishedReleaseStepEnd = releaseWorkflow.indexOf(
+  '\n      - name:',
+  publishedReleaseStepStart,
+);
+const publishedReleaseStep = releaseWorkflow.slice(
+  publishedReleaseStepStart,
+  publishedReleaseStepEnd,
+);
+const publishedReleaseRunStart =
+  publishedReleaseStep.indexOf('        run: |\n');
+assert.notEqual(publishedReleaseRunStart, -1);
+const publishedReleaseLines = [];
+for (const line of publishedReleaseStep
+  .slice(publishedReleaseRunStart + '        run: |\n'.length)
+  .split('\n')) {
+  if (line && !line.startsWith('          ')) break;
+  publishedReleaseLines.push(line.slice(10));
+}
+const publishedReleaseScript = publishedReleaseLines
+  .join('\n')
+  .replace(/\n+$/, '');
+const publishedReleaseFixture = mkdtempSync(
+  join(tmpdir(), 'certkit published release-'),
+);
+try {
+  const checkout = join(publishedReleaseFixture, 'checkout');
+  const releaseDir = join(checkout, 'release');
+  const output = join(publishedReleaseFixture, 'github-output');
+  const preload = join(publishedReleaseFixture, 'github-fixture.mjs');
+  mkdirSync(releaseDir, { recursive: true });
+  writeFileSync(join(releaseDir, 'certkit-v1.2.3.tgz'), 'fixture');
+  writeFileSync(output, '');
+  writeFileSync(
+    preload,
+    `globalThis.fetch = async () => new Response(JSON.stringify([{
+      id: 42, tag_name: 'v1.2.3', draft: false, immutable: true,
+      assets: ['certkit-v1.2.3.tgz', 'manifest.json', 'sbom.cdx.json'].map(name => ({ name }))
+    }]), { status: 200 });\n`,
+  );
+  const verifyPublishedReleaseStep = (script) =>
+    spawnSync('bash', ['-e', '-o', 'pipefail', '-c', script], {
+      cwd: checkout,
+      env: {
+        ...process.env,
+        GITHUB_OUTPUT: output,
+        GITHUB_TOKEN: 'fixture',
+        GITHUB_REPOSITORY: 'code-kev/certkit',
+        RELEASE_TAG: 'v1.2.3',
+        NODE_OPTIONS: `--import=${pathToFileURL(preload).href}`,
+        RELEASE_HELPER: fileURLToPath(
+          new URL('../scripts/release.mjs', import.meta.url),
+        ),
+      },
+      encoding: 'utf8',
+    });
+  const outputCheck = verifyPublishedReleaseStep(
+    publishedReleaseScript.replace(
+      'node scripts/release.mjs release-state',
+      'node "$RELEASE_HELPER" release-state',
+    ),
+  );
+  assert.match(
+    publishedReleaseScript,
+    /node scripts\/release\.mjs release-state/,
+  );
+  assert.match(
+    readFileSync(join(checkout, 'release-state.txt'), 'utf8'),
+    /exists=true\ndraft=false\n/,
+    `release-state helper output was not captured: ${outputCheck.stderr}`,
+  );
+  assert.equal(outputCheck.status, 0, outputCheck.stderr);
+  assert.equal(readFileSync(output, 'utf8'), '');
+} finally {
+  rmSync(publishedReleaseFixture, { recursive: true, force: true });
+}
 const dispatchGuardRunStart = dispatchGuardStep.indexOf('        run: |\n');
 assert.notEqual(dispatchGuardRunStart, -1);
 const dispatchGuardLines = [];

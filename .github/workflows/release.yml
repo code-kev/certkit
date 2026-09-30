@@ -465,9 +465,11 @@ jobs:
           RELEASE_TAG: ${{ needs.validate.outputs.tag }}
           TARBALL_NAME: ${{ needs.produce.outputs.artifact_name }}
         run: |
-          TARBALL_NAME="$(basename "$(find release -maxdepth 1 -name 'certkit-*.tgz' -type f -print -quit)")" node scripts/release.mjs release-state > release-state.txt
-          grep -qx 'exists=true' release-state.txt
-          grep -qx 'draft=false' release-state.txt
+          status_file=release-state.txt
+          : > "$status_file"
+          GITHUB_OUTPUT="$status_file" TARBALL_NAME="$(basename "$(find release -maxdepth 1 -name 'certkit-*.tgz' -type f -print -quit)")" node scripts/release.mjs release-state
+          grep -qx 'exists=true' "$status_file"
+          grep -qx 'draft=false' "$status_file"
 
   bootstrap-summary:
     name: first-publication-handoff
