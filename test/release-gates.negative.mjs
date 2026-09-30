@@ -55,6 +55,28 @@ const sourceScript = sourceLines.join('\n').replace(/\n+$/, '');
 const sourcePrefixEnd = sourceScript.indexOf('\nversion=');
 assert.notEqual(sourcePrefixEnd, -1);
 const sourceSelectionPrefix = sourceScript.slice(0, sourcePrefixEnd);
+const dispatchGuardStart = releaseWorkflow.indexOf(
+  '- name: Guard workflow-dispatch mode',
+);
+assert.notEqual(dispatchGuardStart, -1);
+const dispatchGuardEnd = releaseWorkflow.indexOf(
+  '\n      - name:',
+  dispatchGuardStart,
+);
+const dispatchGuardStep = releaseWorkflow.slice(
+  dispatchGuardStart,
+  dispatchGuardEnd,
+);
+const dispatchGuardRunStart = dispatchGuardStep.indexOf('        run: |\n');
+assert.notEqual(dispatchGuardRunStart, -1);
+const dispatchGuardLines = [];
+for (const line of dispatchGuardStep
+  .slice(dispatchGuardRunStart + '        run: |\n'.length)
+  .split('\n')) {
+  if (line && !line.startsWith('          ')) break;
+  dispatchGuardLines.push(line.slice(10));
+}
+const dispatchGuardScript = dispatchGuardLines.join('\n').replace(/\n+$/, '');
 const sourceHistory = mkdtempSync(join(tmpdir(), 'certkit-source-selection-'));
 const emptyGitConfig = join(sourceHistory, 'empty.gitconfig');
 const fixtureGitEnv = {
@@ -106,9 +128,59 @@ try {
   const mainTipSha = gitOutput(['-C', seed, 'rev-parse', 'HEAD']);
   gitRun(['-C', seed, 'remote', 'add', 'origin', origin]);
   gitRun(['-C', seed, 'push', '-u', 'origin', 'main']);
+  gitRun(['-C', seed, 'tag', '-a', 'v1.2.3', '-m', 'v1.2.3', ancestorSha]);
+  gitRun(['-C', seed, 'push', 'origin', 'refs/tags/v1.2.3']);
   gitRun(['clone', origin, checkout]);
   gitRun(['-C', checkout, 'config', 'user.name', 'Release test']);
   gitRun(['-C', checkout, 'config', 'user.email', 'release@example.test']);
+  const runDispatchGuard = (finalize, published) =>
+    spawnSync('bash', ['-e', '-o', 'pipefail', '-c', dispatchGuardScript], {
+      cwd: checkout,
+      env: {
+        ...fixtureGitEnv,
+        EVENT_NAME: 'workflow_dispatch',
+        FINALIZE_PUBLISHED_RELEASE: String(finalize),
+        PACKAGE_PUBLISHED: String(published),
+        RELEASE_VERSION: '1.2.3',
+        RELEASE_SHA: ancestorSha,
+      },
+      encoding: 'utf8',
+    });
+  assert.equal(runDispatchGuard(false, false).status, 0);
+  assert.notEqual(
+    runDispatchGuard(false, true).status,
+    0,
+    'default dispatch must refuse an already-published version',
+  );
+  assert.equal(runDispatchGuard(true, true).status, 0);
+  assert.notEqual(
+    runDispatchGuard(true, false).status,
+    0,
+    'metadata recovery must require an already-published version',
+  );
+  gitRun([
+    '-C',
+    seed,
+    'tag',
+    '--force',
+    '--annotate',
+    '--message',
+    'mismatched v1.2.3',
+    'v1.2.3',
+    mainTipSha,
+  ]);
+  gitRun(['-C', seed, 'push', '--force', 'origin', 'refs/tags/v1.2.3']);
+  assert.notEqual(
+    runDispatchGuard(true, true).status,
+    0,
+    'metadata recovery must require the version tag to target the selected commit',
+  );
+  gitRun(['-C', seed, 'push', 'origin', ':refs/tags/v1.2.3']);
+  assert.notEqual(
+    runDispatchGuard(true, true).status,
+    0,
+    'metadata recovery must require an existing version tag',
+  );
   const runSelection = (requestedSha) =>
     spawnSync('bash', ['-e', '-o', 'pipefail', '-c', sourceSelectionPrefix], {
       cwd: checkout,
@@ -234,6 +306,82 @@ assert.match(
 assert.match(egressSmoke, /consumerRequire\.resolve\('certkit'\)/);
 assert.match(egressSmoke, /consumerRequire\.resolve\('certkit\/vite'\)/);
 assert.match(releaseWorkflow, /RELEASE_ACTION.*outputs\.action/);
+assert.match(
+  releaseWorkflow,
+  /finalize_published_release:[\s\S]*?default: false[\s\S]*?type: boolean/,
+);
+assert.match(
+  releaseWorkflow,
+  /if: github\.event_name == 'push' \|\| \(github\.event_name == 'workflow_dispatch' && inputs\.finalize_published_release && needs\.validate\.outputs\.published == 'true'\)/,
+);
+assert.match(
+  releaseWorkflow,
+  /if: github\.event_name == 'workflow_dispatch' && inputs\.finalize_published_release != true/,
+);
+assert.match(
+  releaseWorkflow,
+  /Require published version before metadata recovery[\s\S]*?test "\$PACKAGE_PUBLISHED" = true/,
+);
+const registryGuardIndex = releaseWorkflow.indexOf(
+  '- name: Require published version before metadata recovery',
+);
+const installNpmIndex = releaseWorkflow.indexOf(
+  '- name: Install OIDC-capable npm CLI',
+);
+const publishNpmIndex = releaseWorkflow.indexOf(
+  '- name: Publish the tested tarball by OIDC',
+);
+assert.ok(
+  registryGuardIndex < installNpmIndex && installNpmIndex < publishNpmIndex,
+);
+assert.match(
+  releaseWorkflow.slice(
+    publishNpmIndex,
+    releaseWorkflow.indexOf('\n      - name:', publishNpmIndex),
+  ),
+  /if: steps\.registry\.outputs\.published != 'true' && github\.event_name == 'push'/,
+);
+assert.match(
+  releaseWorkflow,
+  /SOURCE_COMMIT: \$\{\{ needs\.validate\.outputs\.selected \}\}/,
+);
+assert.match(
+  releaseWorkflow,
+  /Attest the SBOM[\s\S]*?subject-path: release-metadata\/sbom\.cdx\.json/,
+);
+assert.doesNotMatch(
+  releaseWorkflow.slice(
+    releaseWorkflow.indexOf('- name: Attest the SBOM'),
+    releaseWorkflow.indexOf(
+      '\n      - name:',
+      releaseWorkflow.indexOf('- name: Attest the SBOM'),
+    ),
+  ),
+  /sbom-path:/,
+);
+assert.match(
+  releaseWorkflow,
+  /Attest tarball and SBOM separately\n {8}if: github\.event_name == 'push'/,
+);
+assert.match(
+  releaseWorkflow,
+  /Verify the original tarball attestation[\s\S]*?gh attestation verify "\$tarball" --repo "\$GITHUB_REPOSITORY" --source-digest "\$RELEASE_SHA" --source-ref "refs\/tags\/\$RELEASE_TAG" --signer-workflow "\$GITHUB_REPOSITORY\/\.github\/workflows\/release\.yml" --deny-self-hosted-runners/,
+);
+const releaseNotesStep = releaseWorkflow.slice(
+  releaseWorkflow.indexOf('- name: Create or reuse draft'),
+  releaseWorkflow.indexOf(
+    '\n      - name:',
+    releaseWorkflow.indexOf('- name: Create or reuse draft'),
+  ),
+);
+assert.match(
+  releaseNotesStep,
+  /SOURCE_COMMIT: \$\{\{ needs\.validate\.outputs\.selected \}\}/,
+);
+assert.match(
+  releaseNotesStep,
+  /Source commit: %s\\nTarball SHA-256: %s\\n' "\$SOURCE_COMMIT"/,
+);
 assert.match(releaseWorkflow, /RELEASE_ACTION.*== edit.*gh release edit/s);
 assert.match(releaseWorkflow, /DRAFT_ID.*steps\.draft_release\.outputs\.id/);
 assert.match(

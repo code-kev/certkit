@@ -10,6 +10,11 @@ on:
         description: Main commit to validate and use for first-publication bootstrap
         required: true
         type: string
+      finalize_published_release:
+        description: Complete metadata for an already-published version with its matching tag
+        required: false
+        default: false
+        type: boolean
 
 permissions: {}
 
@@ -79,11 +84,29 @@ jobs:
         env:
           RELEASE_VERSION: ${{ steps.source.outputs.version }}
         run: node scripts/release.mjs state >> "$GITHUB_OUTPUT"
-      - name: Require first-publication version to be unpublished
-        if: github.event_name == 'workflow_dispatch'
+      - name: Guard workflow-dispatch mode
         env:
+          EVENT_NAME: ${{ github.event_name }}
+          FINALIZE_PUBLISHED_RELEASE: ${{ inputs.finalize_published_release }}
           PACKAGE_PUBLISHED: ${{ steps.package.outputs.published }}
-        run: test "$PACKAGE_PUBLISHED" = false
+          RELEASE_VERSION: ${{ steps.source.outputs.version }}
+          RELEASE_SHA: ${{ steps.source.outputs.selected }}
+        run: |
+          if [[ "$EVENT_NAME" != workflow_dispatch ]]; then
+            exit 0
+          fi
+          if [[ "$FINALIZE_PUBLISHED_RELEASE" == true ]]; then
+            test "$PACKAGE_PUBLISHED" = true
+            expected_tag="v$RELEASE_VERSION"
+            git fetch --force --no-tags origin "refs/tags/$expected_tag:refs/tags/$expected_tag"
+            tag_sha="$(git rev-parse --verify "refs/tags/$expected_tag^{commit}")"
+            if [[ "$tag_sha" != "$RELEASE_SHA" ]]; then
+              echo "version tag $expected_tag does not target selected source commit" >&2
+              exit 1
+            fi
+          else
+            test "$PACKAGE_PUBLISHED" = false
+          fi
 
   resolve-artifact:
     name: resolve-tested-artifact
@@ -275,7 +298,7 @@ jobs:
   release:
     name: publish-and-release
     needs: [validate, resolve-artifact, produce, consumer-smoke]
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.finalize_published_release && needs.validate.outputs.published == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment:
@@ -325,18 +348,23 @@ jobs:
             registry_integrity="$(grep '^integrity=' "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2-)"
             test "$registry_integrity" = "$integrity"
           fi
+      - name: Require published version before metadata recovery
+        if: github.event_name == 'workflow_dispatch' && inputs.finalize_published_release
+        env:
+          PACKAGE_PUBLISHED: ${{ steps.registry.outputs.published }}
+        run: test "$PACKAGE_PUBLISHED" = true
       - name: Install OIDC-capable npm CLI
-        if: steps.registry.outputs.published != 'true'
+        if: steps.registry.outputs.published != 'true' && github.event_name == 'push'
         run: npm install --global npm@11.5.1 # zizmor: ignore[adhoc-packages] trusted publishing requires npm >=11.5.1.
       - name: Publish the tested tarball by OIDC
-        if: steps.registry.outputs.published != 'true'
+        if: steps.registry.outputs.published != 'true' && github.event_name == 'push'
         env:
           RELEASE_VERSION: ${{ needs.validate.outputs.version }}
         run: |
           tarball="$(find release -maxdepth 1 -name 'certkit-*.tgz' -type f -print -quit)"
           npm publish "$tarball"
       - name: Confirm registry integrity after publish
-        if: steps.registry.outputs.published != 'true'
+        if: steps.registry.outputs.published != 'true' && github.event_name == 'push'
         env:
           RELEASE_VERSION: ${{ needs.validate.outputs.version }}
         run: |
@@ -352,13 +380,24 @@ jobs:
           github-token: ${{ github.token }}
           path: release-metadata
       - name: Attest tarball and SBOM separately
+        if: github.event_name == 'push'
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
           subject-path: release/certkit-*.tgz
       - name: Attest the SBOM
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
-          sbom-path: release-metadata/sbom.cdx.json
+          subject-path: release-metadata/sbom.cdx.json
+      - name: Verify the original tarball attestation
+        if: github.event_name == 'workflow_dispatch' && inputs.finalize_published_release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          RELEASE_SHA: ${{ needs.validate.outputs.selected }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+        run: |
+          tarball="$(find release -maxdepth 1 -name 'certkit-*.tgz' -type f -print -quit)"
+          gh attestation verify "$tarball" --repo "$GITHUB_REPOSITORY" --source-digest "$RELEASE_SHA" --source-ref "refs/tags/$RELEASE_TAG" --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" --deny-self-hosted-runners
       - name: Inspect any existing release
         id: release_state
         env:
@@ -375,6 +414,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ needs.validate.outputs.tag }}
           SOURCE_RUN_EVENT: ${{ needs.resolve-artifact.outputs.event }}
+          SOURCE_COMMIT: ${{ needs.validate.outputs.selected }}
           RELEASE_ACTION: ${{ steps.release_state.outputs.action }}
         run: |
           if [[ "$SOURCE_RUN_EVENT" == workflow_dispatch ]]; then
@@ -382,7 +422,7 @@ jobs:
           else
             : > release-notes.md
           fi
-          printf 'Source commit: %s\nTarball SHA-256: %s\n' "$GITHUB_SHA" "$(sha256sum release/certkit-*.tgz | cut -d' ' -f1)" >> release-notes.md
+          printf 'Source commit: %s\nTarball SHA-256: %s\n' "$SOURCE_COMMIT" "$(sha256sum release/certkit-*.tgz | cut -d' ' -f1)" >> release-notes.md
           if [[ "$RELEASE_ACTION" == edit ]]; then
             gh release edit "$RELEASE_TAG" --notes-file release-notes.md
           elif [[ "$RELEASE_ACTION" == create ]]; then
@@ -432,7 +472,7 @@ jobs:
   bootstrap-summary:
     name: first-publication-handoff
     needs: [validate, produce, consumer-smoke]
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && inputs.finalize_published_release != true
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}
