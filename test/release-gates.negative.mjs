@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   mkdirSync,
@@ -26,7 +27,86 @@ import {
   verifyTagVersion,
 } from '../scripts/release.mjs';
 
-const sha = 'a'.repeat(40);
+const releaseWorkflow = readFileSync(
+  new URL('../.github/workflows/release.yml', import.meta.url),
+  'utf8',
+);
+const sourceStep = releaseWorkflow.slice(
+  releaseWorkflow.indexOf(
+    '- name: Validate selected source and required checks',
+  ),
+  releaseWorkflow.indexOf(
+    '\n      - name:',
+    releaseWorkflow.indexOf(
+      '- name: Validate selected source and required checks',
+    ),
+  ),
+);
+const sourceRunStart = sourceStep.indexOf('        run: |\n');
+assert.notEqual(sourceRunStart, -1);
+const sourceLines = [];
+for (const line of sourceStep
+  .slice(sourceRunStart + '        run: |\n'.length)
+  .split('\n')) {
+  if (line && !line.startsWith('          ')) break;
+  sourceLines.push(line.slice(10));
+}
+const sourceScript = sourceLines.join('\n').replace(/\n+$/, '');
+const sourcePrefixEnd = sourceScript.indexOf('\nversion=');
+assert.notEqual(sourcePrefixEnd, -1);
+const sourceSelectionPrefix = sourceScript.slice(0, sourcePrefixEnd);
+const gitRun = (args) => execFileSync('git', args, { stdio: 'ignore' });
+const gitOutput = (args) =>
+  execFileSync('git', args, { encoding: 'utf8' }).trim();
+const sourceHistory = mkdtempSync(join(tmpdir(), 'certkit-source-selection-'));
+let selectedSha;
+try {
+  const origin = join(sourceHistory, 'origin.git');
+  const seed = join(sourceHistory, 'seed');
+  const checkout = join(sourceHistory, 'checkout');
+  gitRun(['init', '--bare', '--initial-branch=main', origin]);
+  gitRun(['init', '--initial-branch=main', seed]);
+  gitRun(['-C', seed, 'config', 'user.name', 'Release test']);
+  gitRun(['-C', seed, 'config', 'user.email', 'release@example.test']);
+  writeFileSync(join(seed, 'source.txt'), 'base\n');
+  gitRun(['-C', seed, 'add', 'source.txt']);
+  gitRun(['-C', seed, 'commit', '-m', 'base']);
+  const ancestorSha = gitOutput(['-C', seed, 'rev-parse', 'HEAD']);
+  writeFileSync(join(seed, 'source.txt'), 'main tip\n');
+  gitRun(['-C', seed, 'commit', '-am', 'main tip']);
+  const mainTipSha = gitOutput(['-C', seed, 'rev-parse', 'HEAD']);
+  gitRun(['-C', seed, 'remote', 'add', 'origin', origin]);
+  gitRun(['-C', seed, 'push', '-u', 'origin', 'main']);
+  gitRun(['clone', origin, checkout]);
+  const runSelection = (requestedSha) =>
+    spawnSync('bash', ['-e', '-o', 'pipefail', '-c', sourceSelectionPrefix], {
+      cwd: checkout,
+      env: { ...process.env, RELEASE_SHA: requestedSha },
+      encoding: 'utf8',
+    });
+
+  gitRun(['-C', checkout, 'checkout', ancestorSha]);
+  const valid = runSelection(ancestorSha);
+  assert.equal(valid.status, 0, valid.stderr);
+  selectedSha = ancestorSha;
+  gitRun(['-C', checkout, 'checkout', mainTipSha]);
+  const mismatch = runSelection(ancestorSha);
+  assert.notEqual(
+    mismatch.status,
+    0,
+    'a requested ancestor must not validate when a different commit is checked out',
+  );
+  for (const invalidSha of ['', 'not-a-sha'])
+    assert.notEqual(runSelection(invalidSha).status, 0);
+  gitRun(['-C', checkout, 'checkout', '--orphan', 'unrelated']);
+  gitRun(['-C', checkout, 'commit', '--allow-empty', '-m', 'unrelated']);
+  const unrelatedSha = gitOutput(['-C', checkout, 'rev-parse', 'HEAD']);
+  assert.notEqual(runSelection(unrelatedSha).status, 0);
+} finally {
+  rmSync(sourceHistory, { recursive: true, force: true });
+}
+
+const sha = selectedSha;
 const checkRuns = requiredChecks.map((name) => ({
   name,
   head_sha: sha,
@@ -73,10 +153,6 @@ assert.deepEqual(releaseStateForTag([], releaseTag), {
 assert.throws(() =>
   releaseStateForTag([draftRelease, draftRelease], releaseTag),
 );
-const releaseWorkflow = readFileSync(
-  new URL('../.github/workflows/release.yml', import.meta.url),
-  'utf8',
-);
 const releaseHelper = readFileSync(
   new URL('../scripts/release.mjs', import.meta.url),
   'utf8',
@@ -97,6 +173,25 @@ assert.match(
   releaseWorkflow,
   /^run-name: Release \$\{\{ inputs\.release_sha \|\| github\.sha \}\}$/m,
 );
+assert.match(
+  releaseWorkflow,
+  /selected: \$\{\{ steps\.source\.outputs\.selected \}\}/,
+);
+assert.match(releaseWorkflow, /echo "selected=\$RELEASE_SHA"/);
+assert.match(
+  releaseWorkflow,
+  /ref: \$\{\{ needs\.validate\.outputs\.selected \}\}/,
+);
+assert.match(
+  releaseWorkflow,
+  /RELEASE_SHA: \$\{\{ needs\.validate\.outputs\.selected \}\}/,
+);
+assert.match(releaseWorkflow, /node scripts\/release\.mjs repository/);
+assert.match(
+  releaseWorkflow,
+  /RELEASE_VERSION="\$version" node scripts\/release\.mjs checks/,
+);
+assert.doesNotMatch(releaseWorkflow, /needs\.validate\.outputs\.sha/);
 assert.match(
   releaseWorkflow,
   /sudo unshare --net -- runuser .*scripts\/egress-smoke\.mjs/,

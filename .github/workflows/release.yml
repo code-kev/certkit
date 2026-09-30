@@ -31,7 +31,7 @@ jobs:
       checks: read
       actions: read
     outputs:
-      sha: ${{ steps.source.outputs.sha }}
+      selected: ${{ steps.source.outputs.selected }}
       version: ${{ steps.source.outputs.version }}
       tag: ${{ steps.source.outputs.tag }}
       published: ${{ steps.package.outputs.published }}
@@ -55,7 +55,11 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
-          [[ "$RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          requested_sha="$RELEASE_SHA"
+          resolved_sha="$(git rev-parse --verify 'HEAD^{commit}')"
+          [[ "$resolved_sha" == "$requested_sha" ]] || exit 1
+          export RELEASE_SHA="$resolved_sha"
           git fetch --no-tags origin main
           git merge-base --is-ancestor "$RELEASE_SHA" origin/main
           version="$(git show "$RELEASE_SHA:package.json" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s).version))')"
@@ -66,7 +70,7 @@ jobs:
           node scripts/release.mjs repository
           RELEASE_VERSION="$version" node scripts/release.mjs checks
           {
-            echo "sha=$RELEASE_SHA"
+            echo "selected=$RELEASE_SHA"
             echo "version=$version"
             echo "tag=v$version"
           } >> "$GITHUB_OUTPUT"
@@ -101,12 +105,12 @@ jobs:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.validate.outputs.sha }}
+          ref: ${{ needs.validate.outputs.selected }}
           persist-credentials: false
       - name: Find one immutable prior tarball
         id: resolve
         env:
-          RELEASE_SHA: ${{ needs.validate.outputs.sha }}
+          RELEASE_SHA: ${{ needs.validate.outputs.selected }}
           RELEASE_VERSION: ${{ needs.validate.outputs.version }}
           PACKAGE_PUBLISHED: ${{ needs.validate.outputs.published }}
           GITHUB_TOKEN: ${{ github.token }}
@@ -131,7 +135,7 @@ jobs:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.validate.outputs.sha }}
+          ref: ${{ needs.validate.outputs.selected }}
           persist-credentials: false
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
@@ -149,7 +153,7 @@ jobs:
       - name: Build and pack once
         if: needs.resolve-artifact.outputs.reuse != 'true'
         env:
-          RELEASE_SHA: ${{ needs.validate.outputs.sha }}
+          RELEASE_SHA: ${{ needs.validate.outputs.selected }}
           RELEASE_VERSION: ${{ needs.validate.outputs.version }}
         run: |
           pnpm install --frozen-lockfile
@@ -172,7 +176,7 @@ jobs:
       - name: Verify artifact identity
         id: identity
         env:
-          RELEASE_SHA: ${{ needs.validate.outputs.sha }}
+          RELEASE_SHA: ${{ needs.validate.outputs.selected }}
           RELEASE_VERSION: ${{ needs.validate.outputs.version }}
           ARTIFACT_RUN_ID: ${{ needs.resolve-artifact.outputs.reuse == 'true' && needs.resolve-artifact.outputs.run_id || github.run_id }}
           REUSE: ${{ needs.resolve-artifact.outputs.reuse }}
@@ -206,7 +210,7 @@ jobs:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.validate.outputs.sha }}
+          ref: ${{ needs.validate.outputs.selected }}
           persist-credentials: false
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
@@ -220,7 +224,7 @@ jobs:
           path: release
       - name: Verify transferred digest and install the tarball
         env:
-          RELEASE_SHA: ${{ needs.validate.outputs.sha }}
+          RELEASE_SHA: ${{ needs.validate.outputs.selected }}
           RELEASE_VERSION: ${{ needs.validate.outputs.version }}
           ARTIFACT_RUN_ID: ${{ needs.produce.outputs.run_id }}
         run: | # zizmor: ignore[adhoc-packages] the smoke must install this exact local tarball.
@@ -255,7 +259,7 @@ jobs:
       - name: Generate SBOM for installed consumer tree
         env:
           RELEASE_VERSION: ${{ needs.validate.outputs.version }}
-          RELEASE_SHA: ${{ needs.validate.outputs.sha }}
+          RELEASE_SHA: ${{ needs.validate.outputs.selected }}
         run: |
           npm exec --yes --package=@cyclonedx/cdxgen@12.8.5 -- cdxgen -t nodejs -o release/sbom.cdx.json consumer
           node scripts/release.mjs bind-sbom release/sbom.cdx.json release/manifest.json
@@ -287,7 +291,7 @@ jobs:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.validate.outputs.sha }}
+          ref: ${{ needs.validate.outputs.selected }}
           persist-credentials: false
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
@@ -309,7 +313,7 @@ jobs:
       - name: Verify tarball and current registry state
         id: registry
         env:
-          RELEASE_SHA: ${{ needs.validate.outputs.sha }}
+          RELEASE_SHA: ${{ needs.validate.outputs.selected }}
           RELEASE_VERSION: ${{ needs.validate.outputs.version }}
           ARTIFACT_RUN_ID: ${{ needs.produce.outputs.run_id }}
         run: |
@@ -436,7 +440,7 @@ jobs:
       - name: Record manual 2FA handoff
         env:
           RELEASE_VERSION: ${{ needs.validate.outputs.version }}
-          RELEASE_SHA: ${{ needs.validate.outputs.sha }}
+          RELEASE_SHA: ${{ needs.validate.outputs.selected }}
           ARTIFACT_RUN_ID: ${{ needs.produce.outputs.run_id }}
           ARTIFACT_ID: ${{ needs.produce.outputs.artifact_id }}
         run: |
