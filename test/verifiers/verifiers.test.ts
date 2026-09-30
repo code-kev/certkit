@@ -285,36 +285,8 @@ describe('NSS certutil oracle', () => {
       const binary = certutil as string;
       const sql = `sql:${join(root, entry.case.id, 'nssdb')}`;
       mkdirSync(join(root, entry.case.id, 'nssdb'), { recursive: true });
-      const runCertutil = (args: string[]) => {
-        const debuggerPath = process.env['CERTKIT_NSS_DEBUGGER'];
-        const debuggerScript = process.env['CERTKIT_NSS_GDB_SCRIPT'];
-        if (
-          process.platform === 'win32' &&
-          args[0] === '-V' &&
-          debuggerPath &&
-          debuggerScript
-        ) {
-          return spawnSync(
-            debuggerPath,
-            [
-              '-quiet',
-              '-nx',
-              '-batch',
-              '-iex',
-              'set auto-load off',
-              '-iex',
-              'set debuginfod enabled off',
-              '-x',
-              debuggerScript,
-              '--args',
-              binary,
-              ...args,
-            ],
-            { encoding: 'utf8', timeout: 30_000, maxBuffer: 64 * 1024 },
-          );
-        }
-        return spawnSync(binary, args, { encoding: 'utf8' });
-      };
+      const runCertutil = (args: string[]) =>
+        spawnSync(binary, args, { encoding: 'utf8' });
 
       const initialised = runCertutil(['-N', '-d', sql, '--empty-password']);
       expect(initialised.status, initialised.stderr).toBe(0);
