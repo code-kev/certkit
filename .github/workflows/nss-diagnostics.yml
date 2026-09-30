@@ -25,9 +25,6 @@ jobs:
           - environment: UCRT64
             directory: ucrt64
             package: mingw-w64-ucrt-x86_64-nss
-          - environment: CLANG64
-            directory: clang64
-            package: mingw-w64-clang-x86_64-nss
     steps:
       - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
         with:
@@ -47,8 +44,8 @@ jobs:
           msystem: ${{ matrix.environment }}
           update: true
           cache: false
-          install: ${{ matrix.package }}
-      - name: Compare NSS under full-suite load
+          install: ${{ matrix.package }} mingw-w64-ucrt-x86_64-gdb
+      - name: Configure native NSS diagnostics
         shell: pwsh
         env:
           MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}
@@ -57,11 +54,17 @@ jobs:
           $nssBin = Join-Path $env:MSYS2_LOCATION "$env:NSS_DIRECTORY\bin"
           $env:PATH = "$nssBin;$env:PATH"
           $env:CERTKIT_CERTUTIL = Join-Path $nssBin 'certutil.exe'
+          $env:CERTKIT_NSS_DEBUGGER = Join-Path $nssBin 'gdb.exe'
           if (-not (Test-Path $env:CERTKIT_CERTUTIL)) { throw 'NSS certutil missing' }
+          if (-not (Test-Path $env:CERTKIT_NSS_DEBUGGER)) { throw 'Native GDB missing' }
+          $nssBin >> $env:GITHUB_PATH
+          "CERTKIT_CERTUTIL=$env:CERTKIT_CERTUTIL" >> $env:GITHUB_ENV
+          "CERTKIT_NSS_DEBUGGER=$env:CERTKIT_NSS_DEBUGGER" >> $env:GITHUB_ENV
           pnpm build
           if ($LASTEXITCODE -ne 0) { throw 'Diagnostic build failed' }
-          pnpm coverage
-          if ($LASTEXITCODE -ne 0) { throw 'Full-suite NSS diagnostic failed' }
+      - name: Capture original NSS failure under Bash launch
+        shell: bash
+        run: pnpm coverage --bail=1
       - name: Report NSS native fault metadata
         if: failure()
         shell: pwsh
