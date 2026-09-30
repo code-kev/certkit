@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import path from 'node:path';
 import type { FsGuard } from '../core/cadir.js';
 import { CertkitError } from '../core/errors.js';
 
@@ -8,8 +9,16 @@ export type CommandRunner = (
 ) => string;
 
 function run(command: string, args: readonly string[]): string {
+  const system32 = path.win32.join(
+    process.env['SystemRoot'] || 'C:\\Windows',
+    'System32',
+  );
+  const executable =
+    command === 'powershell.exe'
+      ? path.win32.join(system32, 'WindowsPowerShell', 'v1.0', command)
+      : path.win32.join(system32, `${command}.exe`);
   try {
-    return execFileSync(command, [...args], {
+    return execFileSync(executable, [...args], {
       encoding: 'utf8',
       windowsHide: true,
     });

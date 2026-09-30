@@ -22,38 +22,50 @@ function runner(aclOutput: string, whoami: string = whoamiCsv): CommandRunner {
 }
 
 describe('Windows filesystem guard', () => {
-  it('wraps execFileSync with hidden windows and wraps its failures', () => {
-    mocks.execFileSync.mockImplementation(
-      (command: string, args?: readonly string[]) =>
-        command === 'whoami'
-          ? whoamiCsv
-          : args?.includes('/inheritance:r')
-            ? success
-            : selfAcl,
-    );
-    const guard = createWindowsFsGuard();
+  it.each(['C:\\Windows', ''])(
+    'uses native Windows executables with SystemRoot %j despite a colliding PATH and wraps failures',
+    (systemRoot) => {
+      vi.stubEnv('PATH', 'C:\\msys64\\usr\\bin;C:\\Git\\usr\\bin');
+      vi.stubEnv('SystemRoot', systemRoot);
+      const commands: string[] = [];
+      mocks.execFileSync.mockImplementation(
+        (command: string, args?: readonly string[]) => {
+          commands.push(command);
+          if (command.endsWith('\\whoami.exe')) return whoamiCsv;
+          return args?.includes('/inheritance:r') ? success : selfAcl;
+        },
+      );
+      const guard = createWindowsFsGuard();
 
-    expect(() => guard.protectDirectory(path)).not.toThrow();
-    expect(mocks.execFileSync).toHaveBeenCalledWith(
-      'whoami',
-      ['/user', '/fo', 'csv', '/nh'],
-      { encoding: 'utf8', windowsHide: true },
-    );
+      expect(() => guard.protectDirectory(path)).not.toThrow();
+      expect(mocks.execFileSync).toHaveBeenCalledWith(
+        'C:\\Windows\\System32\\whoami.exe',
+        ['/user', '/fo', 'csv', '/nh'],
+        { encoding: 'utf8', windowsHide: true },
+      );
+      expect(commands).toEqual([
+        'C:\\Windows\\System32\\whoami.exe',
+        'C:\\Windows\\System32\\icacls.exe',
+        'C:\\Windows\\System32\\whoami.exe',
+        'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+      ]);
+      vi.unstubAllEnvs();
 
-    mocks.execFileSync.mockImplementation(() => {
-      throw new Error('spawn failed');
-    });
-    expect(() => guard.protectDirectory(path)).toThrowError(
-      expect.objectContaining({
-        code: 'CA_UNREADABLE',
-        cause: expect.objectContaining({
-          message: expect.stringContaining(
-            'Windows filesystem protection command failed: whoami',
-          ),
+      mocks.execFileSync.mockImplementation(() => {
+        throw new Error('spawn failed');
+      });
+      expect(() => guard.protectDirectory(path)).toThrowError(
+        expect.objectContaining({
+          code: 'CA_UNREADABLE',
+          cause: expect.objectContaining({
+            message: expect.stringContaining(
+              'Windows filesystem protection command failed: whoami',
+            ),
+          }),
         }),
-      }),
-    );
-  });
+      );
+    },
+  );
 
   it('fails closed when the current Windows user cannot be determined', () => {
     const guard = createWindowsFsGuard(() => {

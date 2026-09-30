@@ -1,7 +1,7 @@
 import { X509Certificate } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, readFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { join, posix, resolve } from 'node:path';
 import { CertkitError } from '../core/errors.js';
 import type { Environment } from './detect.js';
 import { type RunResult, resolveNssCertutil } from './run.js';
@@ -79,9 +79,12 @@ function writeFailure(message: string): CertkitError {
   return new CertkitError('STORE_WRITE_FAILED', message);
 }
 
-// resolve() alone misses the literal path on Windows (drive-letter prefix).
+// Native Windows resolution adds a drive prefix; normalize POSIX aliases too.
 export function isSystemNssDb(target: string): boolean {
-  return target === SYSTEM_NSS_DB || resolve(target) === SYSTEM_NSS_DB;
+  return (
+    posix.normalize(target) === SYSTEM_NSS_DB ||
+    resolve(target) === SYSTEM_NSS_DB
+  );
 }
 
 function assertWritableTarget(target: string): void {

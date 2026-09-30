@@ -123,13 +123,23 @@ function opensslText(leafPath: string): string {
 }
 
 function opensslSanLine(text: string): string {
-  const match = /X509v3 Subject Alternative Name:[\s\S]*?\n\s+(.*)\n/.exec(
+  const match = /X509v3 Subject Alternative Name:[\s\S]*?\n\s+(.*)\r?\n/.exec(
     text,
   );
   return match?.[1]?.trim() ?? '';
 }
 
 describe('golden corpus invariants (no oracle required)', () => {
+  it('reads SAN output with Windows and POSIX line endings', () => {
+    for (const newline of ['\n', '\r\n']) {
+      expect(
+        opensslSanLine(
+          `X509v3 Subject Alternative Name:${newline}    DNS:localhost${newline}`,
+        ),
+      ).toBe('DNS:localhost');
+    }
+  });
+
   it.each(cases())(
     '%s mints the golden SAN, extensions, and backdated validity',
     (_id, testCase) => {
