@@ -206,10 +206,14 @@ jobs:
       - name: Coverage
         if: runner.os != 'Windows'
         run: pnpm coverage
+      - name: Windows verifier oracles
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: pnpm vitest run test/verifiers/verifiers.test.ts
       - name: Windows coverage
         if: runner.os == 'Windows'
         shell: pwsh
-        run: pnpm coverage
+        run: pnpm coverage --exclude test/verifiers/verifiers.test.ts
       - name: Native trust roundtrip
         # macOS trust writes require signed-in acceptance testing.
         if: runner.os == 'Linux'
