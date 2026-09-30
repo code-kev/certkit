@@ -286,39 +286,34 @@ describe('NSS certutil oracle', () => {
       const sql = `sql:${join(root, entry.case.id, 'nssdb')}`;
       mkdirSync(join(root, entry.case.id, 'nssdb'), { recursive: true });
       const runCertutil = (args: string[]) => {
-        const result = spawnSync(binary, args, { encoding: 'utf8' });
         const debuggerPath = process.env['CERTKIT_NSS_DEBUGGER'];
+        const debuggerScript = process.env['CERTKIT_NSS_GDB_SCRIPT'];
         if (
           process.platform === 'win32' &&
-          result.status === 0xc0000005 &&
-          debuggerPath
+          args[0] === '-V' &&
+          debuggerPath &&
+          debuggerScript
         ) {
-          const diagnostic = spawnSync(
+          return spawnSync(
             debuggerPath,
             [
+              '-quiet',
               '-nx',
               '-batch',
               '-iex',
               'set auto-load off',
               '-iex',
               'set debuginfod enabled off',
-              '-ex',
-              'set print frame-arguments none',
-              '-ex',
-              'run',
-              '-ex',
-              'bt 8',
+              '-x',
+              debuggerScript,
               '--args',
               binary,
               ...args,
             ],
             { encoding: 'utf8', timeout: 30_000, maxBuffer: 64 * 1024 },
           );
-          console.error(
-            `NSS original access violation; diagnostic status=${diagnostic.status}, signal=${diagnostic.signal}, error=${diagnostic.error?.message ?? 'none'}\n${diagnostic.stdout ?? ''}\n${diagnostic.stderr ?? ''}`,
-          );
         }
-        return result;
+        return spawnSync(binary, args, { encoding: 'utf8' });
       };
 
       const initialised = runCertutil(['-N', '-d', sql, '--empty-password']);

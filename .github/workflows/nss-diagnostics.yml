@@ -44,7 +44,7 @@ jobs:
           msystem: ${{ matrix.environment }}
           update: true
           cache: false
-          install: ${{ matrix.package }} mingw-w64-ucrt-x86_64-gdb
+          install: ${{ matrix.package }} mingw-w64-ucrt-x86_64-gdb mingw-w64-ucrt-x86_64-gcc
       - name: Configure native NSS diagnostics
         shell: pwsh
         env:
@@ -55,11 +55,48 @@ jobs:
           $env:PATH = "$nssBin;$env:PATH"
           $env:CERTKIT_CERTUTIL = Join-Path $nssBin 'certutil.exe'
           $env:CERTKIT_NSS_DEBUGGER = Join-Path $nssBin 'gdb.exe'
+          $env:CERTKIT_NSS_GDB_SCRIPT = Join-Path $env:RUNNER_TEMP 'nss-gdb.txt'
           if (-not (Test-Path $env:CERTKIT_CERTUTIL)) { throw 'NSS certutil missing' }
           if (-not (Test-Path $env:CERTKIT_NSS_DEBUGGER)) { throw 'Native GDB missing' }
           $nssBin >> $env:GITHUB_PATH
           "CERTKIT_CERTUTIL=$env:CERTKIT_CERTUTIL" >> $env:GITHUB_ENV
           "CERTKIT_NSS_DEBUGGER=$env:CERTKIT_NSS_DEBUGGER" >> $env:GITHUB_ENV
+          "CERTKIT_NSS_GDB_SCRIPT=$env:CERTKIT_NSS_GDB_SCRIPT" >> $env:GITHUB_ENV
+          @'
+          set pagination off
+          set print thread-events off
+          set print frame-arguments none
+          run
+          if $_isvoid ($_exitcode)
+            bt 8
+            quit 1
+          end
+          quit $_exitcode
+          '@ | Set-Content -Encoding ascii $env:CERTKIT_NSS_GDB_SCRIPT
+          $canarySource = Join-Path $env:RUNNER_TEMP 'nss-gdb-canary.c'
+          $env:CERTKIT_NSS_GDB_CANARY = Join-Path $env:RUNNER_TEMP 'nss-gdb-canary.exe'
+          @'
+          int main(int argc, char **argv) {
+            if (argc > 1) return argv[1][0] == '7' ? 7 : 0;
+            volatile int *volatile target = (int *)0;
+            *target = 1;
+            return 0;
+          }
+          '@ | Set-Content -Encoding ascii $canarySource
+          & (Join-Path $nssBin 'gcc.exe') -g -O0 $canarySource -o $env:CERTKIT_NSS_GDB_CANARY
+          if ($LASTEXITCODE -ne 0) { throw 'Native debugger canary build failed' }
+          @'
+          const { spawnSync } = require('node:child_process');
+          const common = ['-quiet', '-nx', '-batch', '-iex', 'set auto-load off', '-iex', 'set debuginfod enabled off', '-x', process.env.CERTKIT_NSS_GDB_SCRIPT, '--args', process.env.CERTKIT_NSS_GDB_CANARY];
+          for (const [args, expected] of [[['0'], 0], [['7'], 7], [[], 1]]) {
+            const result = spawnSync(process.env.CERTKIT_NSS_DEBUGGER, [...common, ...args], { encoding: 'utf8', timeout: 30000, maxBuffer: 64 * 1024 });
+            const output = `${result.stdout ?? ''}\n${result.stderr ?? ''}`;
+            if (result.error || result.signal || result.status !== expected) throw new Error(`Debugger canary failed: expected=${expected}, status=${result.status}, signal=${result.signal}, error=${result.error?.message ?? 'none'}\n${output}`);
+            if (!args.length && (!/SIGSEGV/.test(output) || !/#0\s+.*main/.test(output))) throw new Error(`Debugger canary failed to capture the native AV stack\n${output}`);
+            console.log(`Native debugger canary passed: exit ${expected}${args.length ? '' : ', SIGSEGV and main stack captured'}`);
+          }
+          '@ | node
+          if ($LASTEXITCODE -ne 0) { throw 'Native debugger canary failed' }
           pnpm build
           if ($LASTEXITCODE -ne 0) { throw 'Diagnostic build failed' }
       - name: Capture original NSS failure under Bash launch
