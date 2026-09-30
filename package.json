@@ -9,7 +9,8 @@
   },
   "packageManager": "pnpm@10.34.5",
   "sideEffects": [
-    "./dist/reflect-metadata.js"
+    "./dist/reflect-metadata.js",
+    "./src/reflect-metadata.ts"
   ],
   "exports": {
     ".": {
@@ -29,19 +30,27 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsdown",
+    "build": "tsdown && node scripts/check-public-entry.mjs",
     "test": "vitest run",
     "coverage": "vitest run --coverage",
     "commitlint": "commitlint",
-    "lint": "biome check . && depcruise src --config dependency-cruiser.config.mjs && knip && pnpm deps:check",
+    "lint": "biome check . && node scripts/check-boundaries.mjs && knip && pnpm deps:check",
     "typecheck": "tsc --noEmit",
     "deps:check": "node scripts/check-deps.mjs"
   },
   "dependencies": {
-    "@expo/sudo-prompt": "9.3.2",
     "@peculiar/x509": "2.1.0",
     "citty": "0.2.2",
-    "picocolors": "1.1.1"
+    "picocolors": "1.1.1",
+    "reflect-metadata": "0.2.2"
+  },
+  "peerDependencies": {
+    "vite": "^7.0.0 || ^8.0.0"
+  },
+  "peerDependenciesMeta": {
+    "vite": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@arethetypeswrong/core": "0.18.5",
@@ -54,11 +63,14 @@
     "@types/node": "26.6.2",
     "@vitest/coverage-v8": "5.0.1",
     "dependency-cruiser": "18.4.0",
+    "fast-check": "4.10.2",
     "knip": "6.37.0",
     "lefthook": "2.1.14",
     "publint": "0.3.24",
     "tsdown": "0.23.0",
-    "typescript": "7.0.2",
+    "typescript": "6.0.3",
+    "vite": "8.3.0",
+    "vite7": "npm:vite@7.3.6",
     "vitest": "5.0.1"
   }
 }

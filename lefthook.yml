@@ -2,3 +2,5 @@ pre-commit:
   commands:
     biome:
       run: pnpm exec biome check --no-errors-on-unmatched {staged_files}
+    source-policy:
+      run: node scripts/check-source-policy.mjs --staged

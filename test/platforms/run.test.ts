@@ -1,0 +1,220 @@
+import { chmod, copyFile, mkdtemp, rm, symlink } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { inspect } from 'node:util';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { resolveNssCertutil, run } from '../../src/platforms/run.js';
+
+const platformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform');
+
+function setPlatform(platform: NodeJS.Platform): void {
+  Object.defineProperty(process, 'platform', {
+    configurable: true,
+    value: platform,
+  });
+}
+
+afterEach(() => {
+  if (platformDescriptor)
+    Object.defineProperty(process, 'platform', platformDescriptor);
+});
+
+describe('platform command runner', () => {
+  it.each(['PSModulePath', 'pSmOdUlEpAtH'])(
+    'isolates Windows PowerShell module lookup from inherited %s without changing the parent',
+    async (key) => {
+      const root = await mkdtemp(join(tmpdir(), 'certkit-powershell-env-'));
+      const executable = join(root, 'PoWeRsHeLl.ExE');
+      if (process.platform === 'win32') {
+        await copyFile(process.execPath, executable);
+        await chmod(executable, 0o755);
+      } else {
+        await symlink(process.execPath, executable);
+      }
+      vi.stubEnv(key, 'incompatible-powershell-7-modules');
+      vi.stubEnv('CERTKIT_TEST_SENTINEL', 'preserved');
+      const probe =
+        'process.stdout.write(JSON.stringify({ modules: Object.keys(process.env).filter(key => key.toLowerCase() === "psmodulepath"), sentinel: process.env.CERTKIT_TEST_SENTINEL }))';
+      try {
+        const result = await run([executable, '-e', probe]);
+        expect(result.code).toBe(0);
+        expect(JSON.parse(result.stdout)).toEqual({
+          modules: [],
+          sentinel: 'preserved',
+        });
+        expect(process.env[key]).toBe('incompatible-powershell-7-modules');
+        const ordinary = await run([process.execPath, '-e', probe]);
+        expect(JSON.parse(ordinary.stdout).modules.length).toBeGreaterThan(0);
+      } finally {
+        vi.unstubAllEnvs();
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+  it('requires a command', async () => {
+    await expect(run([])).rejects.toMatchObject({
+      code: 'INVALID_OPTIONS',
+      message: 'A command is required.',
+    });
+    await expect(run([''])).rejects.toMatchObject({
+      code: 'INVALID_OPTIONS',
+    });
+  });
+
+  it('returns captured output with a nonzero exit code', async () => {
+    await expect(
+      run([
+        process.execPath,
+        '-e',
+        'process.stdout.write("out"); process.stderr.write("err"); process.exit(3)',
+      ]),
+    ).resolves.toEqual({ code: 3, stdout: 'out', stderr: 'err' });
+  });
+
+  it('passes argv entries as data without shell interpretation', async () => {
+    const args = ['$(rm -rf ~)', 'space here', '; echo unsafe'];
+    const result = await run([
+      process.execPath,
+      '-e',
+      'process.stdout.write(JSON.stringify(process.argv.slice(1)))',
+      ...args,
+    ]);
+    expect(result).toEqual({
+      code: 0,
+      stdout: JSON.stringify(args),
+      stderr: '',
+    });
+  });
+
+  it('returns nonzero exit codes without throwing', async () => {
+    await expect(
+      run([process.execPath, '-e', 'process.exit(7)']),
+    ).resolves.toMatchObject({ code: 7 });
+  });
+
+  it('kills a command after its timeout', async () => {
+    const key =
+      '-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----';
+    const error = await run(
+      [
+        process.execPath,
+        '-e',
+        'process.stdout.write(process.argv.at(-1)); setTimeout(() => {}, 10_000)',
+        '--',
+        key,
+      ],
+      { timeoutMs: 20 },
+    ).catch((failure: unknown) => failure);
+    expect(error).toBeInstanceOf(Error);
+    expect(String(error)).toMatch(/timed out/i);
+    expect(inspect(error, { depth: null })).not.toContain('secret');
+    expect(inspect(error, { depth: null })).not.toContain(key);
+    expect((error as Error & { cause?: unknown }).cause).toBeUndefined();
+  });
+
+  it('does not expose captured output or raw child errors on unexpected failure', async () => {
+    const key =
+      '-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----';
+    const outcome: unknown = await run([
+      process.execPath,
+      '-e',
+      'process.stdout.write(process.argv.at(-1)); process.kill(process.pid, "SIGKILL")',
+      '--',
+      key,
+    ]).catch((failure: unknown) => failure);
+    // Windows has no signal kills: the child surfaces as a numeric exit code.
+    if (process.platform === 'win32') {
+      expect(outcome).toMatchObject({ code: expect.any(Number) });
+      expect(inspect(outcome, { depth: null })).not.toContain('secret');
+      expect(inspect(outcome, { depth: null })).not.toContain(key);
+      return;
+    }
+    expect(outcome).toBeInstanceOf(Error);
+    expect(inspect(outcome, { depth: null })).not.toContain('secret');
+    expect(inspect(outcome, { depth: null })).not.toContain(key);
+    expect((outcome as Error & { cause?: unknown }).cause).toBeUndefined();
+  });
+
+  it('maps a missing executable to UNSUPPORTED_PLATFORM', async () => {
+    const error = await run([
+      '-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----',
+    ]).catch((failure: unknown) => failure);
+    expect(error).toMatchObject({
+      name: 'CertkitError',
+      code: 'UNSUPPORTED_PLATFORM',
+    });
+    expect(inspect(error, { depth: null })).not.toContain('secret');
+    expect(inspect(error, { depth: null })).not.toContain(
+      '-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----',
+    );
+    expect((error as Error & { cause?: unknown }).cause).toBeUndefined();
+  });
+
+  it('redacts private keys in returned output', async () => {
+    const key =
+      '-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----';
+    const result = await run([
+      process.execPath,
+      '-e',
+      'process.stdout.write(process.argv.at(-1)); process.stderr.write(process.argv.at(-1))',
+      '--',
+      key,
+    ]);
+    expect(result.stdout).toBe('[REDACTED]');
+    expect(result.stderr).toBe('[REDACTED]');
+    expect(result.stdout).not.toContain('secret');
+  });
+
+  it('uses only an explicit NSS certutil override when provided', async () => {
+    await expect(
+      resolveNssCertutil({ CERTKIT_CERTUTIL: process.execPath }),
+    ).resolves.toBe(process.execPath);
+  });
+
+  it('does not treat the Windows system certutil as NSS certutil', async () => {
+    await expect(
+      resolveNssCertutil({
+        CERTKIT_CERTUTIL: 'C:\\Windows\\System32\\certutil.exe',
+      }),
+    ).resolves.toBeNull();
+  });
+
+  it('reads the CERTKIT_CERTUTIL environment override when no argument is passed', async () => {
+    vi.stubEnv('CERTKIT_CERTUTIL', process.execPath);
+    try {
+      await expect(resolveNssCertutil()).resolves.toBe(process.execPath);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('rejects the Windows system certutil from the environment override', async () => {
+    vi.stubEnv('CERTKIT_CERTUTIL', 'C:\\Windows\\System32\\certutil.exe');
+    try {
+      await expect(resolveNssCertutil()).resolves.toBeNull();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('probes the NSS program-files locations on Windows', async () => {
+    setPlatform('win32');
+    await expect(resolveNssCertutil({})).resolves.toBeNull();
+  });
+
+  it('probes the Homebrew and /usr/local locations on macOS', async () => {
+    setPlatform('darwin');
+    expect([
+      null,
+      '/opt/homebrew/bin/certutil',
+      '/usr/local/bin/certutil',
+    ]).toContain(await resolveNssCertutil({}));
+  });
+
+  it('probes the system locations on Linux', async () => {
+    setPlatform('linux');
+    expect([null, '/usr/bin/certutil', '/usr/local/bin/certutil']).toContain(
+      await resolveNssCertutil({}),
+    );
+  });
+});
