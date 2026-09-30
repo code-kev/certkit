@@ -2,9 +2,9 @@
 
 Node.js 22.15.0 or newer is required by certkit. Node's CA behavior depends on the platform and runtime configuration.
 
-## Prefer the system store where supported
+## Use system certificates alongside bundled roots
 
-Node 22.15.0 documents `--use-system-ca` for Windows and macOS. It combines system trust with Node's bundled roots. Set it for one process:
+Node 22.15.0 supports `--use-system-ca` on Windows, macOS, and Linux. Node uses its bundled roots by default; this flag adds certificates from the system store. On Linux, Node reads OpenSSL's default CA file and directory (commonly `/etc/ssl/cert.pem` and `/etc/ssl/certs`). Set it for one process:
 
 ```sh
 node --use-system-ca app.js
@@ -24,7 +24,7 @@ $env:NODE_OPTIONS = '--use-system-ca'
 node app.js
 ```
 
-On Linux, Node 22.15 follows the OpenSSL default CA file and directory (commonly `/etc/ssl/cert.pem` and `/etc/ssl/certs`), which distributions generally maintain as their system CA store. The Node 22.15 docs record non-Windows/non-macOS support for the `--use-system-ca` flag beginning in Node 23.9.0; do not assume that flag works on Linux in the Node 22 line.
+The Node 22.15 CLI documentation's version-history table lists non-Windows/non-macOS support starting at 23.9.0, but that table misses the v22.15 backport. The v22.15 source registers `--use-system-ca` without a platform restriction and loads OpenSSL's system CA paths on non-Windows, non-macOS platforms when the flag is enabled: [`node_options.cc`](https://github.com/nodejs/node/blob/v22.15.0/src/node_options.cc#L1092-L1103), [`crypto_context.cc`](https://github.com/nodejs/node/blob/v22.15.0/src/crypto/crypto_context.cc#L702-L713), [`crypto_context.cc` CA selection](https://github.com/nodejs/node/blob/v22.15.0/src/crypto/crypto_context.cc#L743-L760).
 
 ## Add certkit's CA explicitly
 
@@ -69,4 +69,4 @@ If another program needs a PEM file rather than a system-store entry, use `certk
 - The variable is ignored when Node runs as setuid root or with Linux file capabilities.
 - `NODE_OPTIONS` applies to descendant Node processes in the shell environment. Avoid setting it globally on shared runners.
 
-References: [Node.js 22.15 CLI: `--use-system-ca`](https://nodejs.org/download/release/v22.15.0/docs/api/cli.html#--use-system-ca) and [`NODE_EXTRA_CA_CERTS`](https://nodejs.org/download/release/v22.15.0/docs/api/cli.html#node_extra_ca_certsfile).
+References: [Node.js 22.15 CLI: `--use-system-ca`](https://nodejs.org/download/release/v22.15.0/docs/api/cli.html#--use-system-ca), [`NODE_EXTRA_CA_CERTS`](https://nodejs.org/download/release/v22.15.0/docs/api/cli.html#node_extra_ca_certsfile), and the v22.15 source links above.

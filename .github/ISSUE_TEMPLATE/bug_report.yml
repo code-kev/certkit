@@ -46,8 +46,8 @@ body:
     id: result
     attributes:
       label: Expected and observed result
-      validations:
-        required: true
+    validations:
+      required: true
   - type: textarea
     id: output
     attributes:

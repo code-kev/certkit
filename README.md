@@ -101,7 +101,7 @@ npx certkit create localhost 127.0.0.1 ::1
 - **Windows:** certkit installs only in the current user’s Root certificate store. An elevated shell, another user, Windows service, or application running as a different account does not inherit that user’s trust.
 - **WSL:** Linux trust inside WSL does not make Windows browsers trust the CA. Install certkit in the Windows environment for Windows browsers.
 - **Browser support:** detected NSS databases are handled individually. `cert8.db`-only legacy profiles are unsupported. `/etc/pki/nssdb` is status-only/manual in v1.
-- **Node.js:** Node 22.15.0+ can use system CAs with `--use-system-ca`; see [Node trust](docs/node-trust.md) for alternatives and CI/container recipes.
+- **Node.js:** Node 22.15.0+ uses bundled roots by default; `--use-system-ca` adds OS roots on Windows, macOS, and Linux (Linux reads OpenSSL's default CA paths). See [Node trust](docs/node-trust.md) for details and CI/container recipes.
 
 See the [trust matrix](docs/trust-matrix.md) for verification levels, platform versions, and pending coverage.
 
