@@ -203,7 +203,13 @@ jobs:
           if ($help -notmatch '-verify_ip' -or $help -notmatch '-verify_hostname') { throw 'OpenSSL named verification missing' }
           $global:LASTEXITCODE = 0
       - run: pnpm build
-      - run: pnpm coverage
+      - name: Coverage
+        if: runner.os != 'Windows'
+        run: pnpm coverage
+      - name: Windows coverage
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: pnpm coverage
       - name: Native trust roundtrip
         # macOS trust writes require signed-in acceptance testing.
         if: runner.os == 'Linux'

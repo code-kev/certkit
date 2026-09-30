@@ -73,7 +73,10 @@ vi.mock('../src/platforms/nss.js', () => ({
   })),
 }));
 
-vi.mock('../src/platforms/run.js', () => ({ run: vi.fn() }));
+vi.mock('../src/platforms/run.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/platforms/run.js')>()),
+  run: vi.fn(),
+}));
 
 let root = '';
 const nssTargets = [
