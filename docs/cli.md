@@ -1,6 +1,6 @@
 # CLI reference
 
-The `certkit` executable requires Node.js 22.15.0 or newer. These commands describe the package interface; the repository currently has no published npm version.
+The `certkit` executable requires Node.js 22.15.0 or newer. Once the first beta is published, install it from npm's `beta` dist-tag with `npm install certkit@beta`.
 
 ```text
 certkit [--json] [--color|--no-color] <command>

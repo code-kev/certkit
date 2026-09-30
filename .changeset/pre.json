@@ -1,0 +1,12 @@
+{
+  "mode": "pre",
+  "tag": "beta",
+  "initialVersions": {
+    "certkit": "0.0.0"
+  },
+  "changesets": [
+    "initial-release",
+    "quiet-wolves-protect",
+    "tidy-certs-release"
+  ]
+}

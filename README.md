@@ -17,7 +17,7 @@
 
 certkit creates a private local certificate authority and leaf certificates in JavaScript, then installs that CA in supported local trust stores. Use it as a library, CLI, or Vite plugin. It makes no network calls. Linux browser trust needs the system `certutil` tool (package: `libnss3-tools` on Debian/Ubuntu, `nss-tools` on Fedora).
 
-> This repository is not yet published to npm. The install commands below show the intended workflow for a published release.
+> To use a published beta, install the current prerelease from npm's `beta` dist-tag. These install commands apply once the first beta is published.
 
 ## Why certkit
 
@@ -31,8 +31,8 @@ certkit creates a private local certificate authority and leaf certificates in J
 Requires Node.js **22.15.0 or newer**. Install the CA once for your user:
 
 ```sh
-npx certkit install
-npx certkit status
+npx certkit@beta install
+npx certkit@beta status
 ```
 
 On Linux, automatic Chromium and Firefox NSS integration requires `certutil`. Install the OS package `libnss3-tools` (Debian/Ubuntu), `nss-tools` (Fedora), or the distribution’s NSS tools package first. `/etc/pki/nssdb` is manual-only in v1.
@@ -49,7 +49,7 @@ The broad `*.pem` rule also ignores other PEM files in that repository; narrow i
 #### Library
 
 ```sh
-npm install certkit
+npm install certkit@beta
 ```
 
 ```js
@@ -62,12 +62,12 @@ createServer({ cert, key }, (request, response) => {
 }).listen(8443);
 ```
 
-The library generates files in certkit’s CA directory and returns PEM strings; it never installs trust. Run `npx certkit install` separately. The returned private key is sensitive.
+The library generates files in certkit’s CA directory and returns PEM strings; it never installs trust. Run `npx certkit@beta install` separately. The returned private key is sensitive.
 
 #### Vite
 
 ```sh
-npm install -D certkit vite
+npm install -D certkit@beta vite
 ```
 
 ```ts
@@ -81,7 +81,7 @@ export default defineConfig({
 });
 ```
 
-Run `npx certkit install` once before `vite`. HTTPS is opt-in: `server.https: {}` requests it. The plugin fails startup when all detected browser trust targets are untrusted, and warns about uncertain or untrusted targets. If no browser target is detected, trust remains uncertain.
+Run `npx certkit@beta install` once before `vite`. HTTPS is opt-in: `server.https: {}` requests it. The plugin fails startup when all detected browser trust targets are untrusted, and warns about uncertain or untrusted targets. If no browser target is detected, trust remains uncertain.
 
 ![Visual preview of the Vite example](assets/vite-example-preview.png)
 
@@ -90,7 +90,7 @@ This screenshot was rendered from the example over local HTTP with the certkit p
 #### CLI
 
 ```sh
-npx certkit create localhost 127.0.0.1 ::1
+npx certkit@beta create localhost 127.0.0.1 ::1
 # localhost+2.pem and localhost+2-key.pem are written to the current directory
 ```
 
@@ -109,7 +109,7 @@ See the [trust matrix](docs/trust-matrix.md) for verification levels, platform v
 
 | Project | Documented mechanism and scope |
 | --- | --- |
-| **certkit** | JavaScript library, CLI, and Vite plugin; generates a per-user CA and leaf certs; installs in supported OS and NSS stores. Requires Node 22.15.0+. Linux NSS requires system `certutil`. This repository’s package version is still `0.0.0`; no npm release is claimed. |
+| **certkit** | `1.0.0-beta.1` prerelease: JavaScript library, CLI, and Vite plugin; generates a per-user CA and leaf certs; installs in supported OS and NSS stores. Requires Node 22.15.0+. Linux NSS requires system `certutil`. |
 | [mkcert](https://github.com/FiloSottile/mkcert) | Go command-line program; upstream documents installation via package manager, source build, or prebuilt binary; installs roots into OS, Firefox/Chromium NSS, and optional Java stores. Node recipe uses `NODE_EXTRA_CA_CERTS`. |
 | [vite-plugin-mkcert](https://github.com/liuweiGL/vite-plugin-mkcert) | Vite plugin that uses the mkcert executable; upstream documents downloading/upgrading it, a configurable binary path, and proxy/download-source settings. Its README lists Node 22.19.0+. |
 | [@vitejs/plugin-basic-ssl](https://github.com/vitejs/vite-plugin-basic-ssl) | Vite plugin that generates a self-signed, untrusted certificate; browsers show a warning/interstitial before access. |
