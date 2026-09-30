@@ -35,6 +35,7 @@ const originalPlatformDescriptor = Object.getOwnPropertyDescriptor(
   'platform',
 );
 let tempRoot = '';
+const lockWorkers: Array<ReturnType<typeof runLockWorker>> = [];
 
 function fileOptions(fsGuard?: FsGuard): { fsGuard?: FsGuard } {
   return process.platform === 'win32'
@@ -42,6 +43,11 @@ function fileOptions(fsGuard?: FsGuard): { fsGuard?: FsGuard } {
     : fsGuard
       ? { fsGuard }
       : {};
+}
+
+function protectTestDirectory(path: string): void {
+  if (process.platform === 'win32')
+    createWindowsFsGuard().protectDirectory(path);
 }
 
 function readState(
@@ -144,12 +150,16 @@ async function waitFor(
   }
 }
 
-function runLockWorker(dir: string, id: string): Promise<number> {
+function runLockWorker(
+  dir: string,
+  id: string,
+): { promise: Promise<number>; kill: () => void } {
   const vitestCli = fileURLToPath(
     new URL('../../node_modules/vitest/vitest.mjs', import.meta.url),
   );
   const testFile = fileURLToPath(import.meta.url);
-  return new Promise((resolve, reject) => {
+  let kill: () => void = () => {};
+  const promise = new Promise<number>((resolve, reject) => {
     let stdout = '';
     let stderr = '';
     const child = spawn(
@@ -160,7 +170,7 @@ function runLockWorker(dir: string, id: string): Promise<number> {
         testFile,
         '-t',
         'cadir lock race child',
-        '--pool=forks',
+        '--pool=threads',
         '--maxWorkers=1',
       ],
       {
@@ -173,6 +183,9 @@ function runLockWorker(dir: string, id: string): Promise<number> {
         stdio: ['ignore', 'pipe', 'pipe'],
       },
     );
+    kill = () => {
+      child.kill();
+    };
     child.stdout?.on('data', (chunk: Buffer) => {
       stdout += chunk.toString();
     });
@@ -189,6 +202,9 @@ function runLockWorker(dir: string, id: string): Promise<number> {
       resolve(code ?? 1);
     });
   });
+  const worker = { promise, kill: () => kill() };
+  lockWorkers.push(worker);
+  return worker;
 }
 
 beforeEach(async () => {
@@ -199,6 +215,10 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  // Vitest timeouts can run this hook before the test's finally block.
+  for (const worker of lockWorkers) worker.kill();
+  await Promise.allSettled(lockWorkers.map((worker) => worker.promise));
+  lockWorkers.length = 0;
   vi.unstubAllEnvs();
   if (originalPlatformDescriptor)
     Object.defineProperty(process, 'platform', originalPlatformDescriptor);
@@ -333,6 +353,7 @@ describe('CA directory and state', () => {
 
     const directoryStatePath = join(tempRoot, 'ca-with-state-directory');
     mkdirSync(directoryStatePath, { mode: 0o700 });
+    protectTestDirectory(directoryStatePath);
     mkdirSync(join(directoryStatePath, 'state.json'), { mode: 0o700 });
     expect(() => readState(directoryStatePath)).toThrowError(
       expect.objectContaining({ code: 'CA_UNREADABLE' }),
@@ -458,7 +479,14 @@ describe('CA directory lock', () => {
 
     try {
       await expect(
-        withLock(dir, async () => 'acquired', { timeoutMs: 80 }),
+        withLock(dir, async () => 'acquired', {
+          timeoutMs: 80,
+          fsGuard: {
+            protectDirectory() {},
+            assertProtectedDirectory() {},
+            assertProtectedFile() {},
+          },
+        }),
       ).rejects.toMatchObject({
         code: 'CA_UNREADABLE',
         message: expect.stringContaining('Timed out waiting for the CA lock'),
@@ -630,28 +658,32 @@ describe('CA directory lock', () => {
   });
 });
 
-it.skipIf(!workerDir)('cadir lock race child', async () => {
-  if (!workerDir) return;
-  const dir = workerDir;
-  const id = process.env.CERTKIT_LOCK_RACE_ID;
-  if (!id) throw new Error('lock race worker id is missing');
-  appendFileSync(join(dir, 'ready'), `${id}\n`);
-  const releasePath = join(dir, 'release');
-  while (!existsSync(releasePath)) await delay(5);
-  await withLock(
-    dir,
-    async () => {
-      const current = readState(dir);
-      if (!current) throw new Error('lock race state is missing');
-      appendFileSync(join(dir, 'events'), `enter ${id}\n`);
-      await delay(35);
-      current.ca.serial = String(Number(current.ca.serial) + 1);
-      writeStateAtomic(dir, current);
-      appendFileSync(join(dir, 'events'), `leave ${id}\n`);
-    },
-    { timeoutMs: 20_000 },
-  );
-});
+it.skipIf(!workerDir)(
+  'cadir lock race child',
+  async () => {
+    if (!workerDir) return;
+    const dir = workerDir;
+    const id = process.env.CERTKIT_LOCK_RACE_ID;
+    if (!id) throw new Error('lock race worker id is missing');
+    appendFileSync(join(dir, 'ready'), `${id}\n`);
+    const releasePath = join(dir, 'release');
+    while (!existsSync(releasePath)) await delay(5);
+    await withLock(
+      dir,
+      async () => {
+        const current = readState(dir);
+        if (!current) throw new Error('lock race state is missing');
+        appendFileSync(join(dir, 'events'), `enter ${id}\n`);
+        await delay(35);
+        current.ca.serial = String(Number(current.ca.serial) + 1);
+        writeStateAtomic(dir, current);
+        appendFileSync(join(dir, 'events'), `leave ${id}\n`);
+      },
+      { timeoutMs: process.platform === 'win32' ? 60_000 : 20_000 },
+    );
+  },
+  process.platform === 'win32' ? 90_000 : 30_000,
+);
 
 it.skipIf(workerDir)(
   'serializes a controlled multi-process state increment race',
@@ -670,27 +702,34 @@ it.skipIf(workerDir)(
       const workers = Array.from({ length: workerCount }, (_, index) =>
         runLockWorker(roundDir, `${round}-${index}`),
       );
-      await waitFor(
-        () =>
-          existsSync(join(roundDir, 'ready')) &&
-          readFileSync(join(roundDir, 'ready'), 'utf8').trim().split('\n')
-            .length === workerCount,
-        20_000,
-      );
-      writeFileSync(join(roundDir, 'release'), 'go');
-      expect(await Promise.all(workers)).toEqual(Array(workerCount).fill(0));
-      expect(readState(roundDir)?.ca.serial).toBe(String(workerCount));
-      const events = readFileSync(join(roundDir, 'events'), 'utf8')
-        .trim()
-        .split('\n');
-      expect(events).toHaveLength(workerCount * 2);
-      for (let index = 0; index < events.length; index += 2) {
-        expect(events[index]).toMatch(/^enter /);
-        expect(events[index + 1]).toMatch(/^leave /);
+      try {
+        await waitFor(
+          () =>
+            existsSync(join(roundDir, 'ready')) &&
+            readFileSync(join(roundDir, 'ready'), 'utf8').trim().split('\n')
+              .length === workerCount,
+          process.platform === 'win32' ? 60_000 : 20_000,
+        );
+        writeFileSync(join(roundDir, 'release'), 'go');
+        expect(
+          await Promise.all(workers.map((worker) => worker.promise)),
+        ).toEqual(Array(workerCount).fill(0));
+        expect(readState(roundDir)?.ca.serial).toBe(String(workerCount));
+        const events = readFileSync(join(roundDir, 'events'), 'utf8')
+          .trim()
+          .split('\n');
+        expect(events).toHaveLength(workerCount * 2);
+        for (let index = 0; index < events.length; index += 2) {
+          expect(events[index]).toMatch(/^enter /);
+          expect(events[index + 1]).toMatch(/^leave /);
+        }
+      } finally {
+        for (const worker of workers) worker.kill();
+        await Promise.allSettled(workers.map((worker) => worker.promise));
       }
     }
   },
-  30_000,
+  process.platform === 'win32' ? 120_000 : 30_000,
 );
 
 describe('Windows ACL guard', () => {
@@ -940,6 +979,7 @@ describe('CA directory hardening edges', () => {
   ])('rejects malformed state with %s', (_description, json) => {
     const dir = join(tempRoot, 'ca');
     mkdirSync(dir, { mode: 0o700 });
+    protectTestDirectory(dir);
     writeFileSync(join(dir, 'state.json'), json, { mode: 0o600 });
 
     expect(() => readState(dir)).toThrowError(
@@ -953,6 +993,7 @@ describe('CA directory hardening edges', () => {
   it('rejects an unparseable state file', () => {
     const dir = join(tempRoot, 'ca');
     mkdirSync(dir, { mode: 0o700 });
+    protectTestDirectory(dir);
     writeFileSync(join(dir, 'state.json'), '{invalid json', { mode: 0o600 });
 
     expect(() => readState(dir)).toThrowError(

@@ -32,17 +32,33 @@ describe('elevate', () => {
   });
 
   it.each([
-    [[], 'empty'],
-    [['ok', 7], 'non-string'],
-  ])('rejects a %s command without invoking sudo', async (argv) => {
-    await expect(elevate(argv as never)).rejects.toMatchObject({
-      name: 'CertkitError',
-      code: 'INVALID_OPTIONS',
-      message: 'An elevated command is required.',
-    });
+    ['linux', []],
+    ['linux', ['ok', 7]],
+    ['darwin', []],
+    ['darwin', ['ok', 7]],
+    ['win32', []],
+    ['win32', ['ok', 7]],
+  ])(
+    'rejects invalid argv on %s (%s) without invoking sudo',
+    async (platform, argv) => {
+      const originalPlatform = process.platform;
+      Object.defineProperty(process, 'platform', { value: platform });
+      let result!: Promise<void>;
+      try {
+        result = elevate(argv as never);
+      } finally {
+        Object.defineProperty(process, 'platform', { value: originalPlatform });
+      }
 
-    expect(spawnMock).not.toHaveBeenCalled();
-  });
+      await expect(result).rejects.toMatchObject({
+        name: 'CertkitError',
+        code: 'INVALID_OPTIONS',
+        message: 'An elevated command is required.',
+      });
+
+      expect(spawnMock).not.toHaveBeenCalled();
+    },
+  );
 
   it.each([['macos', 'darwin']])(
     'rejects on %s (no elevated command exists)',

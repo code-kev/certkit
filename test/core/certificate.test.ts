@@ -50,6 +50,11 @@ function fileOptions(fsGuard?: FsGuard): { fsGuard?: FsGuard } {
       : {};
 }
 
+function protectTestDirectory(path: string): void {
+  if (process.platform === 'win32')
+    createWindowsFsGuard().protectDirectory(path);
+}
+
 function readState(path: string) {
   return readStateCore(path, fileOptions());
 }
@@ -1383,6 +1388,7 @@ describe('locked CA readers', () => {
 
   it('readCaForStatus rejects CA material without a state file', () => {
     mkdirSync(dir, { mode: 0o700 });
+    protectTestDirectory(dir);
     writeFileSync(join(dir, 'ca-cert.pem'), 'orphan cert', { mode: 0o600 });
 
     expect(() => readCaForStatus(dir, fileOptions())).toThrowError(
@@ -1407,12 +1413,14 @@ describe('locked CA readers', () => {
 
   it('readCaForUninstallLocked returns null for an empty directory', () => {
     mkdirSync(dir, { mode: 0o700 });
+    protectTestDirectory(dir);
 
     expect(readCaForUninstallLocked(dir, fileOptions())).toBeNull();
   });
 
   it('readCaForUninstallLocked rejects CA material without a state file', () => {
     mkdirSync(dir, { mode: 0o700 });
+    protectTestDirectory(dir);
     writeFileSync(join(dir, 'ca-key.pem'), 'orphan key', { mode: 0o600 });
 
     expect(() => readCaForUninstallLocked(dir, fileOptions())).toThrowError(

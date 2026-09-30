@@ -6,6 +6,10 @@ export function shQuote(value: string): string {
 }
 
 export function elevate(argv: string[]): Promise<void> {
+  if (!argv.length || argv.some((part) => typeof part !== 'string'))
+    return Promise.reject(
+      new CertkitError('INVALID_OPTIONS', 'An elevated command is required.'),
+    );
   if (process.platform === 'win32')
     return Promise.reject(
       new CertkitError(
@@ -13,11 +17,6 @@ export function elevate(argv: string[]): Promise<void> {
         'Certkit has no elevated Windows trust-store command.',
       ),
     );
-  if (!argv.length || argv.some((part) => typeof part !== 'string'))
-    return Promise.reject(
-      new CertkitError('INVALID_OPTIONS', 'An elevated command is required.'),
-    );
-
   const command = argv.map(shQuote).join(' ');
   // Only Linux elevates (its system store is root-owned; macOS trust is
   // user-domain and Windows has no elevated trust command). Plain sudo on the
