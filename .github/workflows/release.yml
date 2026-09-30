@@ -1,4 +1,5 @@
 name: Release
+run-name: Release ${{ inputs.release_sha || github.sha }}
 
 on:
   push:
@@ -250,17 +251,7 @@ jobs:
           ./node_modules/.bin/certkit --version | grep -Fx "$RELEASE_VERSION"
       - name: Import in a network-isolated namespace
         run: |
-          sudo unshare --net -- runuser -u "$(id -un)" -- "$(command -v node)" \
-            --input-type=module -e '
-              await import("certkit");
-              await import("certkit/vite");
-              try {
-                await fetch("https://1.1.1.1", { signal: AbortSignal.timeout(3000) });
-                throw new Error("network unexpectedly available");
-              } catch (error) {
-                if (error.message === "network unexpectedly available") throw error;
-              }
-            '
+          sudo unshare --net -- runuser -u "$(id -un)" -- "$(command -v node)" scripts/egress-smoke.mjs
       - name: Generate SBOM for installed consumer tree
         env:
           RELEASE_VERSION: ${{ needs.validate.outputs.version }}

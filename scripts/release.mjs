@@ -86,7 +86,19 @@ export function releaseStateForTag(releases, tag) {
   };
 }
 
-export function selectReusableArtifact(artifacts, name, packagePublished) {
+export function releaseRunMatchesSource(run, sha) {
+  return run.event === 'workflow_dispatch'
+    ? run.display_title === `Release ${sha}`
+    : run.event === 'push' && run.head_sha === sha;
+}
+
+export function selectReusableArtifact(
+  artifacts,
+  name,
+  packagePublished,
+  priorProducer = false,
+  currentAttempt = 1,
+) {
   const candidates = artifacts.filter(
     (artifact) => artifact.name === name && !artifact.expired,
   );
@@ -97,7 +109,83 @@ export function selectReusableArtifact(artifacts, name, packagePublished) {
       candidate,
       `published ${name} has no saved tested tarball; refusing to rebuild`,
     );
+  if (!candidate)
+    assert(
+      !priorProducer && currentAttempt === 1,
+      `prior release run or attempt has no saved tested tarball for ${name}; refusing to rebuild`,
+    );
   return candidate;
+}
+
+export function resolveReusableArtifact({
+  runs,
+  artifacts,
+  name,
+  sha,
+  packagePublished,
+  currentRunId,
+  currentAttempt,
+}) {
+  assert(Array.isArray(runs), 'release workflow run list is unavailable');
+  assert(Array.isArray(artifacts), 'release artifact list is unavailable');
+  assert(
+    Number.isSafeInteger(currentRunId) && Number.isSafeInteger(currentAttempt),
+    'current release run identity is unavailable',
+  );
+  assert(currentAttempt >= 1, 'current release run attempt is invalid');
+  const currentId = String(currentRunId);
+  const runById = new Map(
+    runs.map((run) => {
+      assert(Number.isSafeInteger(run.id), 'release run has no valid ID');
+      return [String(run.id), run];
+    }),
+  );
+  const currentRun = runById.get(currentId);
+  assert(
+    currentRun && releaseRunMatchesSource(currentRun, sha),
+    `current release run identity is unavailable for ${sha}`,
+  );
+  const priorRun = runs.some(
+    (run) => String(run.id) !== currentId && releaseRunMatchesSource(run, sha),
+  );
+  const matchingArtifacts = [];
+  for (const artifact of artifacts) {
+    if (artifact.name !== name) continue;
+    assert(
+      Number.isSafeInteger(artifact.id) &&
+        typeof artifact.expired === 'boolean' &&
+        Number.isSafeInteger(artifact.workflow_run?.id),
+      `artifact identity is unavailable for ${name}`,
+    );
+    const run = runById.get(String(artifact.workflow_run.id));
+    if (!run) continue;
+    if (
+      run.event !== 'workflow_dispatch' &&
+      !(run.event === 'push' && run.head_sha === sha)
+    )
+      continue;
+    matchingArtifacts.push({
+      name: artifact.name,
+      expired: artifact.expired,
+      artifactId: artifact.id,
+      runId: artifact.workflow_run.id,
+      event: run.event,
+    });
+  }
+  return selectReusableArtifact(
+    matchingArtifacts,
+    name,
+    packagePublished,
+    priorRun || matchingArtifacts.length > 0,
+    currentAttempt,
+  );
+}
+
+export function assertEgressDenied(probe) {
+  assert(
+    ['EACCES', 'EPERM', 'EHOSTUNREACH', 'ENETUNREACH'].includes(probe.code),
+    `outbound TCP connection was not proven blocked (${probe.code ?? 'connected'})`,
+  );
 }
 
 export function bindSbom(path, manifestPath) {
@@ -223,29 +311,22 @@ async function resolveArtifact() {
   const version = process.env.RELEASE_VERSION;
   const name = `certkit-v${version}-${sha.slice(0, 12)}`;
   const runs = await githubList(
-    `actions/workflows/release.yml/runs?head_sha=${sha}&per_page=100`,
+    'actions/workflows/release.yml/runs?per_page=100',
     'workflow_runs',
   );
-  const candidates = [];
-  for (const run of runs.filter((item) => item.head_sha === sha)) {
-    const artifacts = await githubList(
-      `actions/runs/${run.id}/artifacts?per_page=100`,
-      'artifacts',
-    );
-    for (const artifact of artifacts)
-      candidates.push({
-        name: artifact.name,
-        expired: artifact.expired,
-        runId: run.id,
-        artifactId: artifact.id,
-        event: run.event,
-      });
-  }
-  const candidate = selectReusableArtifact(
-    candidates,
-    name,
-    process.env.PACKAGE_PUBLISHED === 'true',
+  const artifacts = await githubList(
+    `actions/artifacts?name=${encodeURIComponent(name)}&per_page=100`,
+    'artifacts',
   );
+  const candidate = resolveReusableArtifact({
+    runs,
+    artifacts,
+    name,
+    sha,
+    packagePublished: process.env.PACKAGE_PUBLISHED === 'true',
+    currentRunId: Number(process.env.GITHUB_RUN_ID),
+    currentAttempt: Number(process.env.GITHUB_RUN_ATTEMPT),
+  });
   const output = process.env.GITHUB_OUTPUT;
   writeFileSync(
     output,

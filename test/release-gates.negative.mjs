@@ -11,9 +11,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { checkConsumerTree } from '../scripts/check-deps.mjs';
 import {
+  assertEgressDenied,
   assertSettingsToken,
+  releaseRunMatchesSource,
   releaseStateForTag,
   requiredChecks,
+  resolveReusableArtifact,
   selectReusableArtifact,
   verifyCheckRuns,
   verifyManifest,
@@ -78,8 +81,32 @@ const releaseHelper = readFileSync(
   new URL('../scripts/release.mjs', import.meta.url),
   'utf8',
 );
+const egressSmoke = readFileSync(
+  new URL('../scripts/egress-smoke.mjs', import.meta.url),
+  'utf8',
+);
 assert.match(releaseHelper, /githubList\('releases\?per_page=100'\)/);
 assert.doesNotMatch(releaseHelper, /releases\/tags/);
+assert.match(
+  releaseHelper,
+  /actions\/workflows\/release\.yml\/runs\?per_page=100/,
+);
+assert.match(releaseHelper, /actions\/artifacts\?name=/);
+assert.doesNotMatch(releaseHelper, /runs\?head_sha=/);
+assert.match(
+  releaseWorkflow,
+  /^run-name: Release \$\{\{ inputs\.release_sha \|\| github\.sha \}\}$/m,
+);
+assert.match(
+  releaseWorkflow,
+  /sudo unshare --net -- runuser .*scripts\/egress-smoke\.mjs/,
+);
+assert.match(
+  egressSmoke,
+  /createRequire\(resolve\('consumer', 'package\.json'\)\)/,
+);
+assert.match(egressSmoke, /consumerRequire\.resolve\('certkit'\)/);
+assert.match(egressSmoke, /consumerRequire\.resolve\('certkit\/vite'\)/);
 assert.match(releaseWorkflow, /RELEASE_ACTION.*outputs\.action/);
 assert.match(releaseWorkflow, /RELEASE_ACTION.*== edit.*gh release edit/s);
 assert.match(releaseWorkflow, /DRAFT_ID.*steps\.draft_release\.outputs\.id/);
@@ -97,6 +124,168 @@ const reusableArtifact = {
   runId: 19,
   event: 'workflow_dispatch',
 };
+const currentRun = {
+  id: 33,
+  event: 'push',
+  head_sha: sha,
+  display_title: `Release ${sha}`,
+};
+const bootstrapRun = {
+  id: 19,
+  event: 'workflow_dispatch',
+  head_sha: 'b'.repeat(40),
+  display_title: `Release ${sha}`,
+};
+assert.equal(releaseRunMatchesSource(bootstrapRun, sha), true);
+assert.equal(
+  releaseRunMatchesSource(
+    { ...bootstrapRun, display_title: `Release ${'b'.repeat(40)}` },
+    sha,
+  ),
+  false,
+);
+assert.deepEqual(
+  resolveReusableArtifact({
+    runs: [currentRun, bootstrapRun],
+    artifacts: [
+      {
+        id: 27,
+        name: artifactName,
+        expired: false,
+        workflow_run: { id: 19 },
+      },
+    ],
+    name: artifactName,
+    sha,
+    packagePublished: true,
+    currentRunId: 33,
+    currentAttempt: 1,
+  }),
+  reusableArtifact,
+);
+assert.equal(
+  resolveReusableArtifact({
+    runs: [
+      {
+        ...currentRun,
+        id: 34,
+        event: 'workflow_dispatch',
+        head_sha: 'b'.repeat(40),
+      },
+    ],
+    artifacts: [],
+    name: artifactName,
+    sha,
+    packagePublished: false,
+    currentRunId: 34,
+    currentAttempt: 1,
+  }),
+  undefined,
+);
+for (const retry of [
+  {
+    runs: [currentRun, bootstrapRun],
+    artifacts: [],
+    currentAttempt: 1,
+  },
+  {
+    runs: [currentRun],
+    artifacts: [],
+    currentAttempt: 2,
+  },
+  {
+    runs: [currentRun, bootstrapRun],
+    artifacts: [
+      {
+        id: 28,
+        name: artifactName,
+        expired: true,
+        workflow_run: { id: 19 },
+      },
+    ],
+    currentAttempt: 1,
+  },
+])
+  assert.throws(() =>
+    resolveReusableArtifact({
+      ...retry,
+      name: artifactName,
+      sha,
+      packagePublished: false,
+      currentRunId: 33,
+    }),
+  );
+assert.throws(() =>
+  resolveReusableArtifact({
+    runs: [currentRun],
+    artifacts: [],
+    name: artifactName,
+    sha,
+    packagePublished: true,
+    currentRunId: 33,
+    currentAttempt: 1,
+  }),
+);
+assert.throws(() =>
+  resolveReusableArtifact({
+    runs: [currentRun],
+    artifacts: [],
+    name: artifactName,
+    sha,
+    packagePublished: false,
+    currentRunId: 99,
+    currentAttempt: 1,
+  }),
+);
+assert.throws(() =>
+  resolveReusableArtifact({
+    runs: [currentRun],
+    artifacts: [{ id: 89, name: artifactName, expired: false }],
+    name: artifactName,
+    sha,
+    packagePublished: false,
+    currentRunId: 33,
+    currentAttempt: 1,
+  }),
+);
+assert.equal(
+  resolveReusableArtifact({
+    runs: [currentRun],
+    artifacts: [
+      { id: 88, name: artifactName, expired: false, workflow_run: { id: 77 } },
+    ],
+    name: artifactName,
+    sha,
+    packagePublished: false,
+    currentRunId: 33,
+    currentAttempt: 1,
+  }),
+  undefined,
+);
+assert.throws(() =>
+  resolveReusableArtifact({
+    runs: [currentRun, bootstrapRun],
+    artifacts: [
+      {
+        id: 27,
+        name: artifactName,
+        expired: false,
+        workflow_run: { id: 19 },
+      },
+      {
+        id: 28,
+        name: artifactName,
+        expired: false,
+        workflow_run: { id: 19 },
+      },
+    ],
+    name: artifactName,
+    sha,
+    packagePublished: false,
+    currentRunId: 33,
+    currentAttempt: 1,
+  }),
+);
 assert.deepEqual(
   selectReusableArtifact(
     [
@@ -131,6 +320,15 @@ assert.throws(() =>
     false,
   ),
 );
+assert.doesNotThrow(() => assertEgressDenied({ code: 'ENETUNREACH' }));
+assert.doesNotThrow(() => assertEgressDenied({ code: 'EPERM' }));
+for (const probe of [
+  { connected: true },
+  { code: 'ETIMEDOUT' },
+  { code: 'ECONNRESET' },
+  { code: 'ERR_TLS_CERT_ALTNAME_INVALID' },
+])
+  assert.throws(() => assertEgressDenied(probe));
 verifyRepository(
   {
     repository: {
