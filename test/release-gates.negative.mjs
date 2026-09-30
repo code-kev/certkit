@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   mkdirSync,
@@ -55,12 +55,41 @@ const sourceScript = sourceLines.join('\n').replace(/\n+$/, '');
 const sourcePrefixEnd = sourceScript.indexOf('\nversion=');
 assert.notEqual(sourcePrefixEnd, -1);
 const sourceSelectionPrefix = sourceScript.slice(0, sourcePrefixEnd);
-const gitRun = (args) => execFileSync('git', args, { stdio: 'ignore' });
-const gitOutput = (args) =>
-  execFileSync('git', args, { encoding: 'utf8' }).trim();
 const sourceHistory = mkdtempSync(join(tmpdir(), 'certkit-source-selection-'));
+const emptyGitConfig = join(sourceHistory, 'empty.gitconfig');
+const fixtureGitEnv = {
+  ...process.env,
+  GIT_CONFIG_NOSYSTEM: '1',
+  GIT_CONFIG_GLOBAL: emptyGitConfig,
+  GIT_CONFIG_COUNT: '1',
+  GIT_CONFIG_KEY_0: 'user.useConfigOnly',
+  GIT_CONFIG_VALUE_0: 'true',
+};
+for (const name of [
+  'EMAIL',
+  'GIT_AUTHOR_NAME',
+  'GIT_AUTHOR_EMAIL',
+  'GIT_COMMITTER_NAME',
+  'GIT_COMMITTER_EMAIL',
+  'GIT_CONFIG_PARAMETERS',
+])
+  delete fixtureGitEnv[name];
+const gitRun = (args) => {
+  const result = spawnSync('git', args, {
+    env: fixtureGitEnv,
+    encoding: 'utf8',
+  });
+  assert.equal(
+    result.status,
+    0,
+    `git ${args.join(' ')} failed with status ${result.status}:\n${result.stderr || result.error?.message || 'no stderr'}`,
+  );
+  return result.stdout;
+};
+const gitOutput = (args) => gitRun(args).trim();
 let selectedSha;
 try {
+  writeFileSync(emptyGitConfig, '');
   const origin = join(sourceHistory, 'origin.git');
   const seed = join(sourceHistory, 'seed');
   const checkout = join(sourceHistory, 'checkout');
@@ -78,10 +107,12 @@ try {
   gitRun(['-C', seed, 'remote', 'add', 'origin', origin]);
   gitRun(['-C', seed, 'push', '-u', 'origin', 'main']);
   gitRun(['clone', origin, checkout]);
+  gitRun(['-C', checkout, 'config', 'user.name', 'Release test']);
+  gitRun(['-C', checkout, 'config', 'user.email', 'release@example.test']);
   const runSelection = (requestedSha) =>
     spawnSync('bash', ['-e', '-o', 'pipefail', '-c', sourceSelectionPrefix], {
       cwd: checkout,
-      env: { ...process.env, RELEASE_SHA: requestedSha },
+      env: { ...fixtureGitEnv, RELEASE_SHA: requestedSha },
       encoding: 'utf8',
     });
 
