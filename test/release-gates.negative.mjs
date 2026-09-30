@@ -12,7 +12,9 @@ import { join } from 'node:path';
 import { checkConsumerTree } from '../scripts/check-deps.mjs';
 import {
   assertSettingsToken,
+  releaseStateForTag,
   requiredChecks,
+  selectReusableArtifact,
   verifyCheckRuns,
   verifyManifest,
   verifyPublishedRelease,
@@ -51,6 +53,84 @@ for (const invalid of [
 
 verifyTagVersion('v1.2.3', '1.2.3');
 assert.throws(() => verifyTagVersion('v1.2.4', '1.2.3'));
+const releaseTag = 'v1.2.3';
+const draftRelease = { id: 91, tag_name: releaseTag, draft: true };
+assert.deepEqual(releaseStateForTag([draftRelease], releaseTag), {
+  exists: true,
+  draft: true,
+  id: 91,
+  action: 'edit',
+});
+assert.deepEqual(releaseStateForTag([], releaseTag), {
+  exists: false,
+  draft: false,
+  id: '',
+  action: 'create',
+});
+assert.throws(() =>
+  releaseStateForTag([draftRelease, draftRelease], releaseTag),
+);
+const releaseWorkflow = readFileSync(
+  new URL('../.github/workflows/release.yml', import.meta.url),
+  'utf8',
+);
+const releaseHelper = readFileSync(
+  new URL('../scripts/release.mjs', import.meta.url),
+  'utf8',
+);
+assert.match(releaseHelper, /githubList\('releases\?per_page=100'\)/);
+assert.doesNotMatch(releaseHelper, /releases\/tags/);
+assert.match(releaseWorkflow, /RELEASE_ACTION.*outputs\.action/);
+assert.match(releaseWorkflow, /RELEASE_ACTION.*== edit.*gh release edit/s);
+assert.match(releaseWorkflow, /DRAFT_ID.*steps\.draft_release\.outputs\.id/);
+assert.match(
+  releaseWorkflow,
+  /PATCH "repos\/\$GITHUB_REPOSITORY\/releases\/\$DRAFT_ID"/,
+);
+assert.doesNotMatch(releaseWorkflow, /releases\/tags\/\$RELEASE_TAG/);
+
+const artifactName = `certkit-v1.2.3-${sha.slice(0, 12)}`;
+const reusableArtifact = {
+  name: artifactName,
+  expired: false,
+  artifactId: 27,
+  runId: 19,
+  event: 'workflow_dispatch',
+};
+assert.deepEqual(
+  selectReusableArtifact(
+    [
+      { ...reusableArtifact, expired: true, artifactId: 28 },
+      { ...reusableArtifact, name: 'another-artifact' },
+      reusableArtifact,
+    ],
+    artifactName,
+    true,
+  ),
+  reusableArtifact,
+);
+assert.equal(
+  selectReusableArtifact(
+    [{ ...reusableArtifact, expired: true }],
+    artifactName,
+    false,
+  ),
+  undefined,
+);
+assert.throws(() =>
+  selectReusableArtifact(
+    [{ ...reusableArtifact, expired: true }],
+    artifactName,
+    true,
+  ),
+);
+assert.throws(() =>
+  selectReusableArtifact(
+    [reusableArtifact, { ...reusableArtifact, artifactId: 28 }],
+    artifactName,
+    false,
+  ),
+);
 verifyRepository(
   {
     repository: {

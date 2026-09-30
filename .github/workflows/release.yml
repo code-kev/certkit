@@ -380,7 +380,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ needs.validate.outputs.tag }}
           SOURCE_RUN_EVENT: ${{ needs.resolve-artifact.outputs.event }}
-          RELEASE_EXISTS: ${{ steps.release_state.outputs.exists }}
+          RELEASE_ACTION: ${{ steps.release_state.outputs.action }}
         run: |
           if [[ "$SOURCE_RUN_EVENT" == workflow_dispatch ]]; then
             printf 'First version was published interactively with 2FA; npm OIDC provenance is absent for this version.\n\n' > release-notes.md
@@ -388,10 +388,13 @@ jobs:
             : > release-notes.md
           fi
           printf 'Source commit: %s\nTarball SHA-256: %s\n' "$GITHUB_SHA" "$(sha256sum release/certkit-*.tgz | cut -d' ' -f1)" >> release-notes.md
-          if [[ "$RELEASE_EXISTS" == true ]]; then
+          if [[ "$RELEASE_ACTION" == edit ]]; then
             gh release edit "$RELEASE_TAG" --notes-file release-notes.md
-          else
+          elif [[ "$RELEASE_ACTION" == create ]]; then
             gh release create "$RELEASE_TAG" --draft --verify-tag --title "$RELEASE_TAG" --notes-file release-notes.md
+          else
+            echo "unexpected release action: $RELEASE_ACTION" >&2
+            exit 1
           fi
       - name: Attach tested package, digest manifest and SBOM
         if: steps.release_state.outputs.exists != 'true' || steps.release_state.outputs.draft == 'true'
@@ -400,16 +403,26 @@ jobs:
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ needs.validate.outputs.tag }}
         run: gh release upload "$RELEASE_TAG" release/certkit-*.tgz release/manifest.json release-metadata/sbom.cdx.json --clobber
+      - name: Resolve the draft ID before publishing
+        id: draft_release
+        if: steps.release_state.outputs.exists != 'true' || steps.release_state.outputs.draft == 'true'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+          TARBALL_NAME: ${{ needs.produce.outputs.artifact_name }}
+        run: TARBALL_NAME="$(basename "$(find release -maxdepth 1 -name 'certkit-*.tgz' -type f -print -quit)")" node scripts/release.mjs release-state
       - name: Publish the draft last
         if: steps.release_state.outputs.exists != 'true' || steps.release_state.outputs.draft == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          GITHUB_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+          DRAFT_ACTION: ${{ steps.draft_release.outputs.action }}
+          DRAFT_ID: ${{ steps.draft_release.outputs.id }}
         run: |
-          release_id="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" --jq .id)"
-          gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$release_id" --field draft=false
+          test "$DRAFT_ACTION" = edit
+          test -n "$DRAFT_ID"
+          gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$DRAFT_ID" --field draft=false
       - name: Verify published release immutability and assets
         env:
           GITHUB_TOKEN: ${{ github.token }}

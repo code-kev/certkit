@@ -66,6 +66,40 @@ export function assertSettingsToken(token) {
   );
 }
 
+export function releaseStateForTag(releases, tag) {
+  const matches = releases.filter((release) => release.tag_name === tag);
+  assert(matches.length <= 1, `ambiguous releases for ${tag}`);
+  const release = matches[0];
+  if (!release)
+    return { exists: false, draft: false, id: '', action: 'create' };
+  assert.equal(
+    typeof release.draft,
+    'boolean',
+    'release draft state is missing',
+  );
+  assert(Number.isSafeInteger(release.id), `release ${tag} has no valid ID`);
+  return {
+    exists: true,
+    draft: release.draft,
+    id: release.id,
+    action: release.draft ? 'edit' : 'skip',
+  };
+}
+
+export function selectReusableArtifact(artifacts, name, packagePublished) {
+  const candidates = artifacts.filter(
+    (artifact) => artifact.name === name && !artifact.expired,
+  );
+  assert(candidates.length <= 1, `ambiguous reusable artifacts for ${name}`);
+  const candidate = candidates[0];
+  if (packagePublished)
+    assert(
+      candidate,
+      `published ${name} has no saved tested tarball; refusing to rebuild`,
+    );
+  return candidate;
+}
+
 export function bindSbom(path, manifestPath) {
   const sbom = JSON.parse(readFileSync(path, 'utf8'));
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
@@ -176,7 +210,9 @@ async function githubList(path, key) {
         `GitHub API ${path}: ${response.status} ${await response.text()}`,
       );
     const page = await response.json();
-    values.push(...page[key]);
+    const items = key ? page[key] : page;
+    assert(Array.isArray(items), `GitHub API ${path}: invalid list response`);
+    values.push(...items);
     url = response.headers.get('link')?.match(/<([^>]+)>; rel="next"/)?.[1];
   }
   return values;
@@ -197,20 +233,19 @@ async function resolveArtifact() {
       'artifacts',
     );
     for (const artifact of artifacts)
-      if (artifact.name === name && !artifact.expired)
-        candidates.push({
-          runId: run.id,
-          artifactId: artifact.id,
-          event: run.event,
-        });
+      candidates.push({
+        name: artifact.name,
+        expired: artifact.expired,
+        runId: run.id,
+        artifactId: artifact.id,
+        event: run.event,
+      });
   }
-  assert(candidates.length <= 1, `ambiguous reusable artifacts for ${name}`);
-  const candidate = candidates[0];
-  if (process.env.PACKAGE_PUBLISHED === 'true')
-    assert(
-      candidate,
-      `published ${name} has no saved tested tarball; refusing to rebuild`,
-    );
+  const candidate = selectReusableArtifact(
+    candidates,
+    name,
+    process.env.PACKAGE_PUBLISHED === 'true',
+  );
   const output = process.env.GITHUB_OUTPUT;
   writeFileSync(
     output,
@@ -270,27 +305,10 @@ async function assertReleaseSettings() {
 
 async function releaseState() {
   const tag = process.env.RELEASE_TAG;
-  const path = `releases/tags/${encodeURIComponent(tag)}`;
-  const response = await fetch(
-    `https://api.github.com/repos/${process.env.GITHUB_REPOSITORY}/${path}`,
-    {
-      headers: {
-        accept: 'application/vnd.github+json',
-        authorization: `Bearer ${process.env.GITHUB_TOKEN}`,
-        'x-github-api-version': '2022-11-28',
-      },
-    },
-  );
-  if (response.status === 404) {
-    writeFileSync(process.env.GITHUB_OUTPUT, 'exists=false\n', { flag: 'a' });
-    return;
-  }
-  if (!response.ok)
-    throw new Error(
-      `release API ${path}: ${response.status} ${await response.text()}`,
-    );
-  const release = await response.json();
-  if (!release.draft)
+  const releases = await githubList('releases?per_page=100');
+  const release = releases.find((item) => item.tag_name === tag);
+  const state = releaseStateForTag(releases, tag);
+  if (state.exists && !state.draft)
     verifyPublishedRelease(release, [
       process.env.TARBALL_NAME,
       'manifest.json',
@@ -298,7 +316,7 @@ async function releaseState() {
     ]);
   writeFileSync(
     process.env.GITHUB_OUTPUT,
-    `exists=true\ndraft=${release.draft}\nid=${release.id}\n`,
+    `exists=${state.exists}\ndraft=${state.draft}\nid=${state.id}\naction=${state.action}\n`,
     { flag: 'a' },
   );
 }
