@@ -32,6 +32,19 @@ const noopGuard: FsGuard = {
   assertProtectedFile() {},
 };
 
+function isDefaultGrantCleanup(
+  command: string,
+  argv: readonly string[],
+): boolean {
+  return (
+    command === 'icacls' &&
+    argv.length === 4 &&
+    argv[1] === '/remove:g' &&
+    argv[2] === '*S-1-5-18' &&
+    argv[3] === '*S-1-5-32-544'
+  );
+}
+
 function fixture(): string {
   const root = mkdtempSync(join(tmpdir(), 'certkit-create-'));
   roots.push(root);
@@ -316,6 +329,7 @@ describe('create command', () => {
       const calls: Array<{ path: string; bytes: number }> = [];
       const guard = createWindowsFsGuard((command, argv) => {
         if (command === 'whoami') return '"USER","S-1-5-21-1-2-3"';
+        if (isDefaultGrantCleanup(command, argv)) return '';
         if (argv.includes('/inheritance:r')) return '';
         const match = /-LiteralPath '((?:[^']|'')*)'/.exec(argv[4] ?? '');
         const path = match?.[1]?.replaceAll("''", "'");
@@ -383,6 +397,7 @@ describe('create command', () => {
       const calls: Array<{ path: string; bytes: number }> = [];
       const guard = createWindowsFsGuard((command, argv) => {
         if (command === 'whoami') return '"USER","S-1-5-21-1-2-3"';
+        if (isDefaultGrantCleanup(command, argv)) return '';
         if (argv.includes('/inheritance:r')) return '';
         const match = /-LiteralPath '((?:[^']|'')*)'/.exec(argv[4] ?? '');
         const path = match?.[1]?.replaceAll("''", "'");

@@ -46,6 +46,7 @@ describe('Windows filesystem guard', () => {
       expect(commands).toEqual([
         'C:\\Windows\\System32\\whoami.exe',
         'C:\\Windows\\System32\\icacls.exe',
+        'C:\\Windows\\System32\\icacls.exe',
         'C:\\Windows\\System32\\whoami.exe',
         'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
       ]);
@@ -109,6 +110,70 @@ describe('Windows filesystem guard', () => {
     expect(ps?.[1]).toBe('-NoLogo');
     expect(ps?.[5]).toBe(
       `$ErrorActionPreference = 'Stop'; (Get-Acl -LiteralPath 'C:\\Users\\o''brien\\certkit').Access | ForEach-Object { $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value }`,
+    );
+  });
+
+  it('removes known Windows default grants before strict ACL read-back', () => {
+    const calls: Array<{ command: string; args: readonly string[] }> = [];
+    const guard = createWindowsFsGuard((command, args) => {
+      calls.push({ command, args });
+      if (command === 'whoami') return whoamiCsv;
+      if (command === 'powershell.exe') return selfSid;
+      return success;
+    });
+
+    expect(() => guard.protectDirectory(path)).not.toThrow();
+    expect(calls[1]).toEqual({
+      command: 'icacls',
+      args: [path, '/inheritance:r', '/grant:r', `*${selfSid}:(OI)(CI)F`],
+    });
+    expect(calls[2]).toEqual({
+      command: 'icacls',
+      args: [path, '/remove:g', '*S-1-5-18', '*S-1-5-32-544'],
+    });
+    expect(calls[3]?.command).toBe('whoami');
+    expect(calls[4]?.command).toBe('powershell.exe');
+  });
+
+  it('preserves the LocalSystem self grant when pruning known default grants', () => {
+    const systemSid = 'S-1-5-18';
+    const calls: Array<{ command: string; args: readonly string[] }> = [];
+    const guard = createWindowsFsGuard((command, args) => {
+      calls.push({ command, args });
+      if (command === 'whoami') return `"NT AUTHORITY\\SYSTEM","${systemSid}"`;
+      if (command === 'powershell.exe') return systemSid;
+      return success;
+    });
+
+    expect(() => guard.protectDirectory(path)).not.toThrow();
+    expect(calls[1]?.args).toContain(`*${systemSid}:(OI)(CI)F`);
+    expect(calls[2]).toEqual({
+      command: 'icacls',
+      args: [path, '/remove:g', '*S-1-5-32-544'],
+    });
+  });
+
+  it('still rejects an unknown grant after pruning known default grants', () => {
+    const guard = createWindowsFsGuard((command, _args) => {
+      if (command === 'whoami') return whoamiCsv;
+      if (command === 'powershell.exe') return `${selfSid}\nS-1-1-0`;
+      return success;
+    });
+
+    expect(() => guard.protectDirectory(path)).toThrowError(
+      expect.objectContaining({ code: 'CA_UNREADABLE' }),
+    );
+  });
+
+  it('still rejects a deny ACE for a known SID after pruning its grants', () => {
+    const guard = createWindowsFsGuard((command, _args) => {
+      if (command === 'whoami') return whoamiCsv;
+      if (command === 'powershell.exe') return `${selfSid}\nS-1-5-18`;
+      return success;
+    });
+
+    expect(() => guard.protectDirectory(path)).toThrowError(
+      expect.objectContaining({ code: 'CA_UNREADABLE' }),
     );
   });
 

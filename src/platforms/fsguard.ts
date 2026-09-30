@@ -8,6 +8,8 @@ export type CommandRunner = (
   args: readonly string[],
 ) => string;
 
+const DEFAULT_GRANT_SIDS = ['S-1-5-18', 'S-1-5-32-544'];
+
 function run(command: string, args: readonly string[]): string {
   const system32 = path.win32.join(
     process.env['SystemRoot'] || 'C:\\Windows',
@@ -116,6 +118,15 @@ export function createWindowsFsGuard(runCommand: CommandRunner = run): FsGuard {
           '/grant:r',
           `*${sid}:(OI)(CI)F`,
         ]);
+        const defaultGrants = DEFAULT_GRANT_SIDS.filter(
+          (defaultSid) => defaultSid.toLowerCase() !== sid.toLowerCase(),
+        );
+        if (defaultGrants.length)
+          runCommand('icacls', [
+            path,
+            '/remove:g',
+            ...defaultGrants.map((defaultSid) => `*${defaultSid}`),
+          ]);
       } catch (error) {
         throw new CertkitError(
           'CA_UNREADABLE',

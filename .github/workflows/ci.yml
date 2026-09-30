@@ -208,36 +208,7 @@ jobs:
         if: runner.os != 'Windows'
         env:
           CERTKIT_TRUST_E2E: '1'
-        run: |
-          if [[ "$RUNNER_OS" == macOS ]]; then
-            # Disposable CI fixture: bypass the auth dialog, retaining native trust effects.
-            # Interactive consent is verified separately on a signed-in machine.
-            umask 077
-            auth_snapshot="$(mktemp "$RUNNER_TEMP/certkit-auth.XXXXXX")"
-            security authorizationdb read com.apple.trust-settings.user > "$auth_snapshot"
-            plutil -convert json -o "$auth_snapshot.json" "$auth_snapshot"
-            restore_auth() {
-              result=$?
-              trap - EXIT
-              cat "$auth_snapshot" | sudo -n security authorizationdb write com.apple.trust-settings.user || result=1
-              security authorizationdb read com.apple.trust-settings.user > "$auth_snapshot.restored" || result=1
-              plutil -convert json -o "$auth_snapshot.restored.json" "$auth_snapshot.restored" || result=1
-              node -e 'const fs=require("node:fs"),assert=require("node:assert/strict"); assert.deepEqual(JSON.parse(fs.readFileSync(process.argv[1],"utf8")),JSON.parse(fs.readFileSync(process.argv[2],"utf8")));' "$auth_snapshot.json" "$auth_snapshot.restored.json" || result=1
-              if [[ "$result" == 0 ]]; then
-                rm -f "$auth_snapshot" "$auth_snapshot.json" "$auth_snapshot.restored" "$auth_snapshot.restored.json" || result=1
-              else
-                echo "Retained authorization fixture: $auth_snapshot"
-              fi
-              exit "$result"
-            }
-            trap restore_auth EXIT
-            sudo -n security authorizationdb write com.apple.trust-settings.user allow
-            security authorizationdb read com.apple.trust-settings.user > "$auth_snapshot.allowed"
-            plutil -convert json -o "$auth_snapshot.allowed.json" "$auth_snapshot.allowed"
-            node -e 'const rule=JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8")); require("node:assert/strict").ok(rule.class==="allow" || (rule.class==="rule" && JSON.stringify(rule.rule)==="[\"allow\"]"));' "$auth_snapshot.allowed.json"
-            rm -f "$auth_snapshot.allowed" "$auth_snapshot.allowed.json"
-          fi
-          pnpm vitest run test/e2e/trust.test.ts
+        run: pnpm vitest run test/e2e/trust.test.ts
   test:
     name: test
     needs: [test-matrix]

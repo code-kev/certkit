@@ -302,7 +302,10 @@ async function macosTrust({
   const adapter = createMacosAdapter({
     caCertPath,
     keychainPath,
-    run: nativeRun,
+    run: async (argv) => {
+      console.log(`macOS native trust command: ${argv[0]} ${argv[1]}`);
+      return nativeRun(argv, { timeoutMs: 30_000 });
+    },
   });
   const environment = await detect();
   try {
