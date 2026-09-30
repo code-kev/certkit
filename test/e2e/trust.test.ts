@@ -25,11 +25,12 @@ import type { RunResult } from '../../src/platforms/run.js';
 import { run as nativeRun } from '../../src/platforms/run.js';
 
 const execFile = promisify(execFileCallback);
-const enabled =
-  process.env.CI === 'true' &&
-  process.env.GITHUB_ACTIONS === 'true' &&
-  process.env.CERTKIT_TRUST_E2E === '1';
 const platform = process.platform;
+const enabled =
+  (process.env.CI === 'true' &&
+    process.env.GITHUB_ACTIONS === 'true' &&
+    process.env.CERTKIT_TRUST_E2E === '1') ||
+  (platform === 'darwin' && process.env.CERTKIT_MACOS_INTERACTIVE_E2E === '1');
 const supported = platform === 'linux' || platform === 'darwin';
 const testTrust = enabled && supported ? describe : describe.skip;
 let tempDir: string | undefined;
