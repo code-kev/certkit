@@ -362,7 +362,9 @@ jobs:
           RELEASE_VERSION: ${{ needs.validate.outputs.version }}
         run: |
           tarball="$(find release -maxdepth 1 -name 'certkit-*.tgz' -type f -print -quit)"
-          npm publish "$tarball"
+          npm_tag=latest
+          if [[ "${RELEASE_VERSION%%+*}" == *-* ]]; then npm_tag=beta; fi
+          npm publish "$tarball" --tag "$npm_tag"
       - name: Confirm registry integrity after publish
         if: steps.registry.outputs.published != 'true' && github.event_name == 'push'
         env:
@@ -404,6 +406,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
           TARBALL_NAME: ${{ needs.produce.outputs.artifact_name }}
         run: |
           TARBALL_NAME="$(basename "$(find release -maxdepth 1 -name 'certkit-*.tgz' -type f -print -quit)")" node scripts/release.mjs release-state
@@ -415,6 +418,7 @@ jobs:
           RELEASE_TAG: ${{ needs.validate.outputs.tag }}
           SOURCE_RUN_EVENT: ${{ needs.resolve-artifact.outputs.event }}
           SOURCE_COMMIT: ${{ needs.validate.outputs.selected }}
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
           RELEASE_ACTION: ${{ steps.release_state.outputs.action }}
         run: |
           if [[ "$SOURCE_RUN_EVENT" == workflow_dispatch ]]; then
@@ -426,7 +430,11 @@ jobs:
           if [[ "$RELEASE_ACTION" == edit ]]; then
             gh release edit "$RELEASE_TAG" --notes-file release-notes.md
           elif [[ "$RELEASE_ACTION" == create ]]; then
-            gh release create "$RELEASE_TAG" --draft --verify-tag --title "$RELEASE_TAG" --notes-file release-notes.md
+            if [[ "${RELEASE_VERSION%%+*}" == *-* ]]; then
+              gh release create "$RELEASE_TAG" --draft --prerelease --verify-tag --title "$RELEASE_TAG" --notes-file release-notes.md
+            else
+              gh release create "$RELEASE_TAG" --draft --verify-tag --title "$RELEASE_TAG" --notes-file release-notes.md
+            fi
           else
             echo "unexpected release action: $RELEASE_ACTION" >&2
             exit 1
@@ -445,8 +453,21 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
           TARBALL_NAME: ${{ needs.produce.outputs.artifact_name }}
         run: TARBALL_NAME="$(basename "$(find release -maxdepth 1 -name 'certkit-*.tgz' -type f -print -quit)")" node scripts/release.mjs release-state
+      - name: Set draft prerelease metadata
+        if: steps.release_state.outputs.exists != 'true' || steps.release_state.outputs.draft == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          DRAFT_ID: ${{ steps.draft_release.outputs.id }}
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          test -n "$DRAFT_ID"
+          prerelease=false
+          if [[ "${RELEASE_VERSION%%+*}" == *-* ]]; then prerelease=true; fi
+          gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$DRAFT_ID" --field prerelease="$prerelease"
       - name: Publish the draft last
         if: steps.release_state.outputs.exists != 'true' || steps.release_state.outputs.draft == 'true'
         env:
@@ -463,6 +484,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
           TARBALL_NAME: ${{ needs.produce.outputs.artifact_name }}
         run: |
           status_file=release-state.txt

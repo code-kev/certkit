@@ -115,10 +115,23 @@ export async function detect(probes: DetectProbes = {}): Promise<Environment> {
     probes.which ??
     (async (command: string) => {
       try {
-        return (await run(['which', command])).code === 0;
+        if ((await run(['which', command])).code === 0) return true;
       } catch {
-        return false;
+        // Fall through to PATH when the external lookup utility is unavailable.
       }
+      for (const directory of (process.env['PATH'] ?? '').split(
+        path.delimiter,
+      )) {
+        const candidate = path.join(directory || '.', command);
+        if (await exists(fs, candidate, constants.X_OK)) {
+          try {
+            if ((await fs.stat(candidate)).isFile()) return true;
+          } catch {
+            // PATH entries that disappear during probing are absent.
+          }
+        }
+      }
+      return false;
     });
   const home = homedir();
   const stores: Environment['stores'] = [

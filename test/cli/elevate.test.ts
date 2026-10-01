@@ -102,7 +102,7 @@ describe('elevate', () => {
         expect(elevate(['update-ca-trust'])).resolves.toBeUndefined(),
       );
       expect(spawnMock).toHaveBeenCalledWith('sudo', ['update-ca-trust'], {
-        stdio: 'inherit',
+        stdio: ['inherit', process.stderr.fd, 'inherit'],
       });
     });
 

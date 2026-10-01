@@ -32,6 +32,24 @@ const releaseWorkflow = readFileSync(
   new URL('../.github/workflows/release.yml', import.meta.url),
   'utf8',
 );
+const workflowStepScript = (name) => {
+  const start = releaseWorkflow.indexOf(`- name: ${name}`);
+  assert.notEqual(start, -1, `missing workflow step: ${name}`);
+  const end = releaseWorkflow.indexOf('\n      - ', start);
+  const step = releaseWorkflow.slice(start, end < 0 ? undefined : end);
+  const runStart = step.indexOf('        run: |\n');
+  assert.notEqual(runStart, -1, `workflow step has no script: ${name}`);
+  return step
+    .slice(runStart + '        run: |\n'.length)
+    .split('\n')
+    .map((line) => {
+      if (line && !line.startsWith('          ')) return undefined;
+      return line.slice(10);
+    })
+    .filter((line) => line !== undefined)
+    .join('\n')
+    .replace(/\n+$/, '');
+};
 const sourceStep = releaseWorkflow.slice(
   releaseWorkflow.indexOf(
     '- name: Validate selected source and required checks',
@@ -107,7 +125,7 @@ try {
   writeFileSync(
     preload,
     `globalThis.fetch = async () => new Response(JSON.stringify([{
-      id: 42, tag_name: 'v1.2.3', draft: false, immutable: true,
+      id: 42, tag_name: 'v1.2.3', draft: false, immutable: true, prerelease: false,
       assets: ['certkit-v1.2.3.tgz', 'manifest.json', 'sbom.cdx.json'].map(name => ({ name }))
     }]), { status: 200 });\n`,
   );
@@ -120,6 +138,7 @@ try {
         GITHUB_TOKEN: 'fixture',
         GITHUB_REPOSITORY: 'code-kev/certkit',
         RELEASE_TAG: 'v1.2.3',
+        RELEASE_VERSION: '1.2.3',
         NODE_OPTIONS: `--import=${pathToFileURL(preload).href}`,
         RELEASE_HELPER: fileURLToPath(
           new URL('../scripts/release.mjs', import.meta.url),
@@ -470,6 +489,97 @@ assert.match(
 );
 assert.doesNotMatch(releaseWorkflow, /releases\/tags\/\$RELEASE_TAG/);
 
+const npmPublishScript = workflowStepScript(
+  'Publish the tested tarball by OIDC',
+);
+assert.match(npmPublishScript, /npm publish "\$tarball" --tag "\$npm_tag"/);
+const releaseTagFixture = mkdtempSync(join(tmpdir(), 'certkit-release-tags-'));
+try {
+  const bin = join(releaseTagFixture, 'bin');
+  mkdirSync(bin);
+  mkdirSync(join(releaseTagFixture, 'release'));
+  writeFileSync(join(releaseTagFixture, 'release', 'certkit-fixture.tgz'), 'x');
+  const npmCapture = join(releaseTagFixture, 'npm-args.txt');
+  writeFileSync(
+    join(bin, 'npm'),
+    '#!/bin/sh\nprintf "%s\\n" "$*" >> "$NPM_CAPTURE"\n',
+    { mode: 0o755 },
+  );
+  for (const [version, expectedTag] of [
+    ['1.0.0-beta.2', 'beta'],
+    ['1.0.0', 'latest'],
+    ['1.2.3+build-7', 'latest'],
+  ]) {
+    const publish = spawnSync(
+      'bash',
+      ['-e', '-o', 'pipefail', '-c', npmPublishScript],
+      {
+        cwd: releaseTagFixture,
+        env: {
+          ...process.env,
+          PATH: `${bin}:${process.env.PATH}`,
+          RELEASE_VERSION: version,
+          NPM_CAPTURE: npmCapture,
+        },
+        encoding: 'utf8',
+      },
+    );
+    assert.equal(publish.status, 0, publish.stderr);
+    assert.match(
+      readFileSync(npmCapture, 'utf8').trimEnd(),
+      new RegExp(`--tag ${expectedTag}$`),
+    );
+    writeFileSync(npmCapture, '');
+  }
+} finally {
+  rmSync(releaseTagFixture, { recursive: true, force: true });
+}
+
+const prereleaseScript = workflowStepScript('Set draft prerelease metadata');
+const prereleaseFixture = mkdtempSync(
+  join(tmpdir(), 'certkit-release-prerelease-'),
+);
+try {
+  const bin = join(prereleaseFixture, 'bin');
+  mkdirSync(bin);
+  const ghCapture = join(prereleaseFixture, 'gh-args.txt');
+  writeFileSync(
+    join(bin, 'gh'),
+    '#!/bin/sh\nprintf "%s\\n" "$*" >> "$GH_CAPTURE"\n',
+    { mode: 0o755 },
+  );
+  for (const [version, expectedValue] of [
+    ['1.0.0-beta.2', 'true'],
+    ['1.0.0', 'false'],
+    ['1.2.3+build-7', 'false'],
+  ]) {
+    const update = spawnSync(
+      'bash',
+      ['-e', '-o', 'pipefail', '-c', prereleaseScript],
+      {
+        cwd: prereleaseFixture,
+        env: {
+          ...process.env,
+          PATH: `${bin}:${process.env.PATH}`,
+          GITHUB_REPOSITORY: 'code-kev/certkit',
+          DRAFT_ID: '91',
+          RELEASE_VERSION: version,
+          GH_CAPTURE: ghCapture,
+        },
+        encoding: 'utf8',
+      },
+    );
+    assert.equal(update.status, 0, update.stderr);
+    assert.match(
+      readFileSync(ghCapture, 'utf8').trimEnd(),
+      new RegExp(`releases/91 --field prerelease=${expectedValue}$`),
+    );
+    writeFileSync(ghCapture, '');
+  }
+} finally {
+  rmSync(prereleaseFixture, { recursive: true, force: true });
+}
+
 const artifactName = `certkit-v1.2.3-${sha.slice(0, 12)}`;
 const reusableArtifact = {
   name: artifactName,
@@ -701,19 +811,83 @@ assert.throws(() =>
 assertSettingsToken('read-only-token');
 assert.throws(() => assertSettingsToken(''));
 verifyPublishedRelease(
-  { draft: false, immutable: true, assets: [{ name: 'package.tgz' }] },
+  {
+    draft: false,
+    immutable: true,
+    prerelease: true,
+    assets: [{ name: 'package.tgz' }],
+  },
   ['package.tgz'],
+  '1.2.3-beta.2',
+);
+verifyPublishedRelease(
+  {
+    draft: false,
+    immutable: true,
+    prerelease: false,
+    assets: [{ name: 'package.tgz' }],
+  },
+  ['package.tgz'],
+  '1.2.3',
+);
+verifyPublishedRelease(
+  {
+    draft: false,
+    immutable: true,
+    prerelease: false,
+    assets: [{ name: 'package.tgz' }],
+  },
+  ['package.tgz'],
+  '1.2.3+build-7',
 );
 assert.throws(() =>
   verifyPublishedRelease(
-    { draft: false, immutable: false, assets: [{ name: 'package.tgz' }] },
+    {
+      draft: false,
+      immutable: true,
+      prerelease: false,
+      assets: [{ name: 'package.tgz' }],
+    },
     ['package.tgz'],
+    '1.2.3-beta.2',
+  ),
+);
+assert.throws(
+  () =>
+    verifyPublishedRelease(
+      {
+        draft: false,
+        immutable: true,
+        prerelease: false,
+        assets: [{ name: 'package.tgz' }],
+      },
+      ['package.tgz'],
+    ),
+  /release version is required/,
+);
+assert.throws(() =>
+  verifyPublishedRelease(
+    {
+      draft: false,
+      immutable: true,
+      prerelease: true,
+      assets: [{ name: 'package.tgz' }],
+    },
+    ['package.tgz'],
+    '1.2.3',
   ),
 );
 assert.throws(() =>
-  verifyPublishedRelease({ draft: false, immutable: true, assets: [] }, [
-    'package.tgz',
-  ]),
+  verifyPublishedRelease(
+    {
+      draft: false,
+      immutable: true,
+      prerelease: false,
+      assets: [],
+    },
+    ['package.tgz'],
+    '1.2.3',
+  ),
 );
 
 const directory = mkdtempSync(join(tmpdir(), 'certkit-release-'));

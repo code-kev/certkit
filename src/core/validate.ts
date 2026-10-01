@@ -34,6 +34,8 @@ export function validateNames(names: string[]): ValidName[] {
     const wildcard = name.startsWith('*.');
     const input = wildcard ? name.slice(2) : name;
     if (!wildcard && isIP(input)) return { kind: 'ip', ip: canonicalIp(input) };
+    if (/[/?#\\%]|\p{Cc}/u.test(input))
+      throw new CertkitError('INVALID_NAME', `Invalid name: ${name}`);
 
     const ascii = domainToASCII(input);
     if (!ascii) throw new CertkitError('INVALID_NAME', `Invalid name: ${name}`);
