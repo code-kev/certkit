@@ -86,6 +86,9 @@ const dispatchGuardStep = releaseWorkflow.slice(
   dispatchGuardStart,
   dispatchGuardEnd,
 );
+const resumeArtifactGuardScript = workflowStepScript(
+  'Require the original artifact for tagged release recovery',
+);
 const publishedReleaseStepStart = releaseWorkflow.indexOf(
   '- name: Verify published release immutability and assets',
 );
@@ -111,6 +114,9 @@ for (const line of publishedReleaseStep
 const publishedReleaseScript = publishedReleaseLines
   .join('\n')
   .replace(/\n+$/, '');
+const recoveryAttestationScript = workflowStepScript(
+  'Verify tagged recovery tarball attestation',
+);
 const publishedReleaseFixture = mkdtempSync(
   join(tmpdir(), 'certkit published release-'),
 );
@@ -232,16 +238,23 @@ try {
   gitRun(['clone', origin, checkout]);
   gitRun(['-C', checkout, 'config', 'user.name', 'Release test']);
   gitRun(['-C', checkout, 'config', 'user.email', 'release@example.test']);
-  const runDispatchGuard = (finalize, published) =>
+  const runDispatchGuard = (
+    finalize,
+    published,
+    resume = false,
+    ref = 'refs/heads/main',
+  ) =>
     spawnSync('bash', ['-e', '-o', 'pipefail', '-c', dispatchGuardScript], {
       cwd: checkout,
       env: {
         ...fixtureGitEnv,
         EVENT_NAME: 'workflow_dispatch',
         FINALIZE_PUBLISHED_RELEASE: String(finalize),
+        RESUME_TAGGED_RELEASE: String(resume),
         PACKAGE_PUBLISHED: String(published),
         RELEASE_VERSION: '1.2.3',
         RELEASE_SHA: ancestorSha,
+        GITHUB_REF: ref,
       },
       encoding: 'utf8',
     });
@@ -252,6 +265,22 @@ try {
     'default dispatch must refuse an already-published version',
   );
   assert.equal(runDispatchGuard(true, true).status, 0);
+  assert.equal(runDispatchGuard(false, false, true).status, 0);
+  assert.notEqual(
+    runDispatchGuard(false, true, true).status,
+    0,
+    'tagged release recovery must reject an already-published version',
+  );
+  assert.notEqual(
+    runDispatchGuard(true, false, true).status,
+    0,
+    'tagged release recovery cannot be combined with metadata finalization',
+  );
+  assert.notEqual(
+    runDispatchGuard(false, false, true, 'refs/heads/codex/recovery').status,
+    0,
+    'tagged release recovery must run from main',
+  );
   assert.notEqual(
     runDispatchGuard(true, false).status,
     0,
@@ -274,11 +303,21 @@ try {
     0,
     'metadata recovery must require the version tag to target the selected commit',
   );
+  assert.notEqual(
+    runDispatchGuard(false, false, true).status,
+    0,
+    'tagged release recovery must require the version tag to target the selected commit',
+  );
   gitRun(['-C', seed, 'push', 'origin', ':refs/tags/v1.2.3']);
   assert.notEqual(
     runDispatchGuard(true, true).status,
     0,
     'metadata recovery must require an existing version tag',
+  );
+  assert.notEqual(
+    runDispatchGuard(false, false, true).status,
+    0,
+    'tagged release recovery must require an existing version tag',
   );
   const runSelection = (requestedSha) =>
     spawnSync('bash', ['-e', '-o', 'pipefail', '-c', sourceSelectionPrefix], {
@@ -407,11 +446,16 @@ assert.match(egressSmoke, /consumerRequire\.resolve\('certkit\/vite'\)/);
 assert.match(releaseWorkflow, /RELEASE_ACTION.*outputs\.action/);
 assert.match(
   releaseWorkflow,
+  /resume_tagged_release:[\s\S]*?default: false[\s\S]*?type: boolean/,
+);
+assert.match(releaseWorkflow, /resume_artifact_id:[\s\S]*?type: string/);
+assert.match(
+  releaseWorkflow,
   /finalize_published_release:[\s\S]*?default: false[\s\S]*?type: boolean/,
 );
 assert.match(
   releaseWorkflow,
-  /if: github\.event_name == 'push' \|\| \(github\.event_name == 'workflow_dispatch' && inputs\.finalize_published_release && needs\.validate\.outputs\.published == 'true'\)/,
+  /if: github\.event_name == 'push' \|\| \(github\.event_name == 'workflow_dispatch' && \(\(inputs\.finalize_published_release && needs\.validate\.outputs\.published == 'true'\) \|\| inputs\.resume_tagged_release\)\)/,
 );
 assert.match(
   releaseWorkflow,
@@ -421,6 +465,23 @@ assert.match(
   releaseWorkflow,
   /Require published version before metadata recovery[\s\S]*?test "\$PACKAGE_PUBLISHED" = true/,
 );
+assert.match(
+  releaseWorkflow,
+  /Guard workflow-dispatch mode[\s\S]*?RESUME_TAGGED_RELEASE[\s\S]*?test "\$PACKAGE_PUBLISHED" = false/,
+);
+assert.match(
+  releaseWorkflow,
+  /test "\$FINALIZE_PUBLISHED_RELEASE" != true \|\| test "\$RESUME_TAGGED_RELEASE" != true/,
+);
+assert.match(
+  dispatchGuardStep,
+  /test "\$GITHUB_REF" = refs\/heads\/main[\s\S]*expected_tag="v\$RELEASE_VERSION"[\s\S]*tag_sha.*RELEASE_SHA/,
+);
+assert.match(
+  sourceScript,
+  /if \[\[ "\$EVENT_NAME" == push \]\]; then\n\s+RELEASE_VERSION="\$version" node scripts\/release\.mjs version/,
+);
+assert.doesNotMatch(sourceScript, /RESUME_TAGGED_RELEASE/);
 const registryGuardIndex = releaseWorkflow.indexOf(
   '- name: Require published version before metadata recovery',
 );
@@ -434,11 +495,15 @@ assert.ok(
   registryGuardIndex < installNpmIndex && installNpmIndex < publishNpmIndex,
 );
 assert.match(
+  releaseWorkflow,
+  /Confirm registry integrity after publish\n {8}if: steps\.registry\.outputs\.published != 'true' && \(github\.event_name == 'push' \|\| \(github\.event_name == 'workflow_dispatch' && inputs\.resume_tagged_release\)\)/,
+);
+assert.match(
   releaseWorkflow.slice(
     publishNpmIndex,
     releaseWorkflow.indexOf('\n      - name:', publishNpmIndex),
   ),
-  /if: steps\.registry\.outputs\.published != 'true' && github\.event_name == 'push'/,
+  /if: steps\.registry\.outputs\.published != 'true' && \(github\.event_name == 'push' \|\| \(github\.event_name == 'workflow_dispatch' && inputs\.resume_tagged_release\)\)/,
 );
 assert.match(
   releaseWorkflow,
@@ -460,7 +525,29 @@ assert.doesNotMatch(
 );
 assert.match(
   releaseWorkflow,
-  /Attest tarball and SBOM separately\n {8}if: github\.event_name == 'push'/,
+  /Attest tarball and SBOM separately\n {8}if: github\.event_name == 'push' \|\| \(github\.event_name == 'workflow_dispatch' && inputs\.resume_tagged_release\)/,
+);
+assert.match(
+  recoveryAttestationScript,
+  /--source-digest "\$GITHUB_SHA" --source-ref "\$GITHUB_REF"/,
+);
+assert.match(
+  recoveryAttestationScript,
+  /--signer-workflow "\$GITHUB_REPOSITORY\/\.github\/workflows\/release\.yml" --deny-self-hosted-runners/,
+);
+assert.doesNotMatch(
+  releaseWorkflow.slice(
+    releaseWorkflow.indexOf(
+      '- name: Verify tagged recovery tarball attestation',
+    ),
+    releaseWorkflow.indexOf(
+      '\n      - name:',
+      releaseWorkflow.indexOf(
+        '- name: Verify tagged recovery tarball attestation',
+      ),
+    ),
+  ),
+  /GITHUB_(?:SHA|REF):/,
 );
 assert.match(
   releaseWorkflow,
@@ -492,7 +579,7 @@ assert.doesNotMatch(releaseWorkflow, /releases\/tags\/\$RELEASE_TAG/);
 const npmPublishScript = workflowStepScript(
   'Publish the tested tarball by OIDC',
 );
-assert.match(npmPublishScript, /npm publish "\$tarball" --tag "\$npm_tag"/);
+assert.match(npmPublishScript, /npm publish "\.\/\$tarball" --tag "\$npm_tag"/);
 const releaseTagFixture = mkdtempSync(join(tmpdir(), 'certkit-release-tags-'));
 try {
   const bin = join(releaseTagFixture, 'bin');
@@ -525,14 +612,57 @@ try {
       },
     );
     assert.equal(publish.status, 0, publish.stderr);
-    assert.match(
+    assert.equal(
       readFileSync(npmCapture, 'utf8').trimEnd(),
-      new RegExp(`--tag ${expectedTag}$`),
+      `publish ./release/certkit-fixture.tgz --tag ${expectedTag}`,
     );
     writeFileSync(npmCapture, '');
   }
 } finally {
   rmSync(releaseTagFixture, { recursive: true, force: true });
+}
+
+const artifactGuardFixture = mkdtempSync(
+  join(tmpdir(), 'certkit-release-artifact-guard-'),
+);
+try {
+  const runArtifactGuard = (reuse, resolvedArtifactId, requiredArtifactId) =>
+    spawnSync(
+      'bash',
+      ['-e', '-o', 'pipefail', '-c', resumeArtifactGuardScript],
+      {
+        cwd: artifactGuardFixture,
+        env: {
+          ...process.env,
+          RESUME_TAGGED_RELEASE: 'true',
+          RESOLVED_REUSE: reuse,
+          RESOLVED_ARTIFACT_ID: resolvedArtifactId,
+          RESUME_ARTIFACT_ID: requiredArtifactId,
+        },
+        encoding: 'utf8',
+      },
+    );
+  assert.equal(
+    runArtifactGuard('true', '11135119901', '11135119901').status,
+    0,
+  );
+  assert.notEqual(
+    runArtifactGuard('false', '', '11135119901').status,
+    0,
+    'recovery must refuse to build when its original artifact is absent',
+  );
+  assert.notEqual(
+    runArtifactGuard('true', '11135119902', '11135119901').status,
+    0,
+    'recovery must refuse a different artifact ID',
+  );
+  assert.notEqual(
+    runArtifactGuard('true', '11135119901', '').status,
+    0,
+    'recovery must require an explicit original artifact ID',
+  );
+} finally {
+  rmSync(artifactGuardFixture, { recursive: true, force: true });
 }
 
 const prereleaseScript = workflowStepScript('Set draft prerelease metadata');

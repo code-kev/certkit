@@ -15,6 +15,15 @@ on:
         required: false
         default: false
         type: boolean
+      resume_tagged_release:
+        description: Retry an unpublished tagged release using its original tested artifact
+        required: false
+        default: false
+        type: boolean
+      resume_artifact_id:
+        description: Exact original artifact ID required for tagged release recovery
+        required: false
+        type: string
 
 permissions: {}
 
@@ -88,11 +97,25 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           FINALIZE_PUBLISHED_RELEASE: ${{ inputs.finalize_published_release }}
+          RESUME_TAGGED_RELEASE: ${{ inputs.resume_tagged_release }}
           PACKAGE_PUBLISHED: ${{ steps.package.outputs.published }}
           RELEASE_VERSION: ${{ steps.source.outputs.version }}
           RELEASE_SHA: ${{ steps.source.outputs.selected }}
         run: |
           if [[ "$EVENT_NAME" != workflow_dispatch ]]; then
+            exit 0
+          fi
+          test "$FINALIZE_PUBLISHED_RELEASE" != true || test "$RESUME_TAGGED_RELEASE" != true
+          if [[ "$RESUME_TAGGED_RELEASE" == true ]]; then
+            test "$PACKAGE_PUBLISHED" = false
+            test "$GITHUB_REF" = refs/heads/main
+            expected_tag="v$RELEASE_VERSION"
+            git fetch --force --no-tags origin "refs/tags/$expected_tag:refs/tags/$expected_tag"
+            tag_sha="$(git rev-parse --verify "refs/tags/$expected_tag^{commit}")"
+            if [[ "$tag_sha" != "$RELEASE_SHA" ]]; then
+              echo "version tag $expected_tag does not target selected source commit" >&2
+              exit 1
+            fi
             exit 0
           fi
           if [[ "$FINALIZE_PUBLISHED_RELEASE" == true ]]; then
@@ -139,6 +162,16 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: node scripts/release.mjs resolve-artifact
+      - name: Require the original artifact for tagged release recovery
+        if: inputs.resume_tagged_release
+        env:
+          RESUME_ARTIFACT_ID: ${{ inputs.resume_artifact_id }}
+          RESOLVED_REUSE: ${{ steps.resolve.outputs.reuse }}
+          RESOLVED_ARTIFACT_ID: ${{ steps.resolve.outputs.artifact_id }}
+        run: |
+          [[ "$RESUME_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
+          test "$RESOLVED_REUSE" = true
+          test "$RESOLVED_ARTIFACT_ID" = "$RESUME_ARTIFACT_ID"
 
   produce:
     name: produce-or-reuse-tarball
@@ -298,7 +331,7 @@ jobs:
   release:
     name: publish-and-release
     needs: [validate, resolve-artifact, produce, consumer-smoke]
-    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.finalize_published_release && needs.validate.outputs.published == 'true')
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && ((inputs.finalize_published_release && needs.validate.outputs.published == 'true') || inputs.resume_tagged_release))
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment:
@@ -354,19 +387,19 @@ jobs:
           PACKAGE_PUBLISHED: ${{ steps.registry.outputs.published }}
         run: test "$PACKAGE_PUBLISHED" = true
       - name: Install OIDC-capable npm CLI
-        if: steps.registry.outputs.published != 'true' && github.event_name == 'push'
+        if: steps.registry.outputs.published != 'true' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.resume_tagged_release))
         run: npm install --global npm@11.5.1 # zizmor: ignore[adhoc-packages] trusted publishing requires npm >=11.5.1.
       - name: Publish the tested tarball by OIDC
-        if: steps.registry.outputs.published != 'true' && github.event_name == 'push'
+        if: steps.registry.outputs.published != 'true' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.resume_tagged_release))
         env:
           RELEASE_VERSION: ${{ needs.validate.outputs.version }}
         run: |
           tarball="$(find release -maxdepth 1 -name 'certkit-*.tgz' -type f -print -quit)"
           npm_tag=latest
           if [[ "${RELEASE_VERSION%%+*}" == *-* ]]; then npm_tag=beta; fi
-          npm publish "$tarball" --tag "$npm_tag"
+          npm publish "./$tarball" --tag "$npm_tag"
       - name: Confirm registry integrity after publish
-        if: steps.registry.outputs.published != 'true' && github.event_name == 'push'
+        if: steps.registry.outputs.published != 'true' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.resume_tagged_release))
         env:
           RELEASE_VERSION: ${{ needs.validate.outputs.version }}
         run: |
@@ -382,10 +415,18 @@ jobs:
           github-token: ${{ github.token }}
           path: release-metadata
       - name: Attest tarball and SBOM separately
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.resume_tagged_release)
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
           subject-path: release/certkit-*.tgz
+      - name: Verify tagged recovery tarball attestation
+        if: github.event_name == 'workflow_dispatch' && inputs.resume_tagged_release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          tarball="$(find release -maxdepth 1 -name 'certkit-*.tgz' -type f -print -quit)"
+          gh attestation verify "$tarball" --repo "$GITHUB_REPOSITORY" --source-digest "$GITHUB_SHA" --source-ref "$GITHUB_REF" --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" --deny-self-hosted-runners
       - name: Attest the SBOM
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
@@ -496,7 +537,7 @@ jobs:
   bootstrap-summary:
     name: first-publication-handoff
     needs: [validate, produce, consumer-smoke]
-    if: github.event_name == 'workflow_dispatch' && inputs.finalize_published_release != true
+    if: github.event_name == 'workflow_dispatch' && inputs.finalize_published_release != true && inputs.resume_tagged_release != true
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}
