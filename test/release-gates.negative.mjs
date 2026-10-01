@@ -21,12 +21,88 @@ import {
   resolveReusableArtifact,
   selectReusableArtifact,
   verifyCheckRuns,
+  verifyDraftRelease,
   verifyManifest,
   verifyPublishedRelease,
   verifyRegistryIntegrity,
   verifyRepository,
   verifyTagVersion,
+  waitForRegistryIntegrity,
 } from '../scripts/release.mjs';
+
+const registryManifest = {
+  version: '1.0.0-beta.2',
+  integrity: 'sha512-tested',
+};
+const originalFetch = globalThis.fetch;
+try {
+  let requests = 0;
+  globalThis.fetch = async () => {
+    requests++;
+    return requests < 3
+      ? new Response('', { status: 404 })
+      : Response.json({ dist: { integrity: registryManifest.integrity } });
+  };
+  await waitForRegistryIntegrity(registryManifest, { attempts: 3, delayMs: 0 });
+  assert.equal(
+    requests,
+    3,
+    'wait for registry processing without republishing',
+  );
+  requests = 0;
+  globalThis.fetch = async () => {
+    requests++;
+    return new Response('', { status: 404 });
+  };
+  await assert.rejects(
+    waitForRegistryIntegrity(registryManifest, { attempts: 2, delayMs: 0 }),
+    /not available/,
+  );
+  assert.equal(requests, 2);
+  for (const response of [
+    new Response('', { status: 500 }),
+    Response.json({ dist: { integrity: 'sha512-different' } }),
+    Response.json({ dist: {} }),
+  ]) {
+    requests = 0;
+    globalThis.fetch = async () => {
+      requests++;
+      return response;
+    };
+    await assert.rejects(
+      waitForRegistryIntegrity(registryManifest, { attempts: 3, delayMs: 0 }),
+    );
+    assert.equal(
+      requests,
+      1,
+      'registry errors and mismatches must fail immediately',
+    );
+  }
+} finally {
+  globalThis.fetch = originalFetch;
+}
+
+const completeDraft = {
+  id: 91,
+  tag_name: 'v1.0.0-beta.2',
+  draft: true,
+  prerelease: true,
+  assets: ['certkit-fixture.tgz', 'manifest.json', 'sbom.cdx.json'].map(
+    (name) => ({ name }),
+  ),
+};
+const draftAssets = completeDraft.assets.map((asset) => asset.name);
+verifyDraftRelease(completeDraft, 91, draftAssets, '1.0.0-beta.2');
+for (const invalid of [
+  { ...completeDraft, id: 92 },
+  { ...completeDraft, tag_name: 'untagged-placeholder' },
+  { ...completeDraft, draft: false },
+  { ...completeDraft, prerelease: false },
+  { ...completeDraft, assets: completeDraft.assets.slice(1) },
+])
+  assert.throws(() =>
+    verifyDraftRelease(invalid, 91, draftAssets, '1.0.0-beta.2'),
+  );
 
 const releaseWorkflow = readFileSync(
   new URL('../.github/workflows/release.yml', import.meta.url),
@@ -266,10 +342,10 @@ try {
   );
   assert.equal(runDispatchGuard(true, true).status, 0);
   assert.equal(runDispatchGuard(false, false, true).status, 0);
-  assert.notEqual(
+  assert.equal(
     runDispatchGuard(false, true, true).status,
     0,
-    'tagged release recovery must reject an already-published version',
+    'tagged recovery may finalize a published version with its original artifact',
   );
   assert.notEqual(
     runDispatchGuard(true, false, true).status,
@@ -665,6 +741,11 @@ try {
   rmSync(artifactGuardFixture, { recursive: true, force: true });
 }
 
+assert.match(
+  releaseWorkflow,
+  /name: Check out release controls[\s\S]*?ref: \$\{\{ github\.workflow_sha \}\}[\s\S]*?path: release-controls[\s\S]*?persist-credentials: false/,
+);
+
 const prereleaseScript = workflowStepScript('Set draft prerelease metadata');
 const prereleaseFixture = mkdtempSync(
   join(tmpdir(), 'certkit-release-prerelease-'),
@@ -675,7 +756,7 @@ try {
   const ghCapture = join(prereleaseFixture, 'gh-args.txt');
   writeFileSync(
     join(bin, 'gh'),
-    '#!/bin/sh\nprintf "%s\\n" "$*" >> "$GH_CAPTURE"\n',
+    '#!/bin/sh\nprintf "%s\\n" "$*" >> "$GH_CAPTURE"\nif [ "$1" = api ] && [ "$2" != --method ]; then cat "$GH_DRAFT_JSON"; fi\n',
     { mode: 0o755 },
   );
   for (const [version, expectedValue] of [
@@ -694,6 +775,8 @@ try {
           GITHUB_REPOSITORY: 'code-kev/certkit',
           DRAFT_ID: '91',
           RELEASE_VERSION: version,
+          RELEASE_TAG: `v${version}`,
+          RELEASE_SHA: 'a'.repeat(40),
           GH_CAPTURE: ghCapture,
         },
         encoding: 'utf8',
@@ -702,10 +785,109 @@ try {
     assert.equal(update.status, 0, update.stderr);
     assert.match(
       readFileSync(ghCapture, 'utf8').trimEnd(),
-      new RegExp(`releases/91 --field prerelease=${expectedValue}$`),
+      new RegExp(`--field prerelease=${expectedValue}`),
+    );
+    assert.match(readFileSync(ghCapture, 'utf8'), /--raw-field tag_name=v/);
+    assert.ok(
+      readFileSync(ghCapture, 'utf8').includes(
+        `--raw-field tag_name=v${version}`,
+      ),
+    );
+    assert.match(
+      readFileSync(ghCapture, 'utf8'),
+      /--raw-field target_commitish=a{40}/,
     );
     writeFileSync(ghCapture, '');
   }
+  mkdirSync(join(prereleaseFixture, 'release'));
+  writeFileSync(
+    join(prereleaseFixture, 'release', 'certkit-fixture.tgz'),
+    'fixture',
+  );
+  const draftFile = join(prereleaseFixture, 'draft.json');
+  mkdirSync(join(prereleaseFixture, 'scripts'));
+  writeFileSync(
+    join(prereleaseFixture, 'scripts', 'release.mjs'),
+    'throw new Error("original source helper has no new recovery commands");\n',
+  );
+  const controls = join(prereleaseFixture, 'release-controls', 'scripts');
+  mkdirSync(controls, { recursive: true });
+  for (const file of ['release.mjs', 'check-deps.mjs'])
+    writeFileSync(
+      join(controls, file),
+      readFileSync(new URL(`../scripts/${file}`, import.meta.url)),
+    );
+  const verifyDraftScript = workflowStepScript(
+    'Verify draft before publishing',
+  );
+  const draftEnv = {
+    ...process.env,
+    PATH: `${bin}:${process.env.PATH}`,
+    GITHUB_REPOSITORY: 'code-kev/certkit',
+    DRAFT_ID: '91',
+    RELEASE_TAG: 'v1.0.0-beta.2',
+    RELEASE_SHA: 'a'.repeat(40),
+    RELEASE_VERSION: '1.0.0-beta.2',
+    DRAFT_ACTION: 'edit',
+    GH_CAPTURE: ghCapture,
+    GH_DRAFT_JSON: draftFile,
+  };
+  for (const [draft, valid] of [
+    [completeDraft, true],
+    [{ ...completeDraft, tag_name: 'untagged-placeholder' }, false],
+    [{ ...completeDraft, draft: false }, false],
+    [{ ...completeDraft, prerelease: false }, false],
+    [{ ...completeDraft, assets: completeDraft.assets.slice(1) }, false],
+  ]) {
+    writeFileSync(draftFile, JSON.stringify(draft));
+    const result = spawnSync(
+      'bash',
+      ['-e', '-o', 'pipefail', '-c', verifyDraftScript],
+      {
+        cwd: prereleaseFixture,
+        env: draftEnv,
+        encoding: 'utf8',
+      },
+    );
+    assert.equal(result.status === 0, valid, result.stderr);
+  }
+  writeFileSync(ghCapture, '');
+  const publishDraftScript = workflowStepScript('Publish the draft last');
+  const publishDraft = spawnSync(
+    'bash',
+    ['-e', '-o', 'pipefail', '-c', publishDraftScript],
+    {
+      cwd: prereleaseFixture,
+      env: draftEnv,
+      encoding: 'utf8',
+    },
+  );
+  assert.equal(publishDraft.status, 0, publishDraft.stderr);
+  assert.match(
+    readFileSync(ghCapture, 'utf8'),
+    /--raw-field tag_name=v1\.0\.0-beta\.2/,
+  );
+  assert.match(
+    readFileSync(ghCapture, 'utf8'),
+    /--raw-field target_commitish=a{40}/,
+  );
+  assert.match(readFileSync(ghCapture, 'utf8'), /--field draft=false/);
+  assert.ok(
+    releaseWorkflow.indexOf('- name: Verify draft before publishing') <
+      releaseWorkflow.indexOf('- name: Publish the draft last'),
+  );
+  assert.match(
+    releaseWorkflow,
+    /run: node release-controls\/scripts\/release\.mjs wait-registry release\/manifest\.json/,
+  );
+  assert.match(
+    releaseWorkflow,
+    /REGISTRY_INTEGRITY: \$\{\{ needs\.validate\.outputs\.integrity \}\}/,
+  );
+  assert.match(
+    releaseWorkflow,
+    /if \[\[ "\$PACKAGE_PUBLISHED" == true \]\]; then test -n "\$REGISTRY_INTEGRITY"; fi/,
+  );
 } finally {
   rmSync(prereleaseFixture, { recursive: true, force: true });
 }
