@@ -25,7 +25,7 @@ If npm already has the version but the tag workflow failed before completing Git
 
 ## Later releases and retries
 
-Merge the manually prepared Changesets version PR, then create and push the matching `vVERSION` tag. The tag run validates the same source gates before building. It creates one tarball, smoke-tests that tarball, and passes it to the protected `npm-publish` job by artifact ID; every consumer recomputes and checks the tarball SHA-256 from `manifest.json`.
+Merge the manually prepared Changesets version PR, then create and push the matching `vVERSION` tag. The tag run validates the same source gates before building. It creates one tarball, smoke-tests that tarball, and passes it to the protected `npm-publish` job by artifact ID; every consumer recomputes and checks the tarball SHA-256 from `manifest.json`. Prerelease versions publish with npm's `beta` tag and GitHub's prerelease flag; stable versions publish with npm's `latest` tag and a regular GitHub release.
 
 If a version is already present in npm, the workflow never publishes it again and never builds a replacement. It resolves the prior tarball artifact for that exact source commit and version and checks the manifest, SHA-256, SRI, and current registry integrity. Missing, expired, or ambiguous artifacts stop the workflow. Complete missing metadata manually and record it; immutable published releases cannot be edited.
 

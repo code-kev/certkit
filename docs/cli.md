@@ -13,6 +13,7 @@ caroot [--json]
 ```
 
 `--json` can be passed at the command level. JSON is written as one document to stdout; diagnostics and warnings go to stderr. JSON objects include `schemaVersion: 1`.
+Unknown options are rejected with exit code `2` before a command runs. Put certificate names that start with `-` after `--`.
 
 ## `certkit install`
 
@@ -49,6 +50,7 @@ A dry run prints planned removal commands. An unresolved target or failed remova
 ## `certkit create`
 
 Create a leaf certificate for one or more DNS names, leftmost wildcards, or IP literals. The CA is created if missing. This command does not install it.
+DNS names cannot contain URL separators, percent escapes, or ASCII control characters.
 
 ```sh
 certkit create localhost 127.0.0.1 ::1

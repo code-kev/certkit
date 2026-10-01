@@ -233,9 +233,18 @@ export function verifyRegistryIntegrity(manifest, integrity) {
   );
 }
 
-export function verifyPublishedRelease(release, expectedAssets) {
+export function verifyPublishedRelease(release, expectedAssets, version) {
+  assert(
+    typeof version === 'string' && version.length > 0,
+    'release version is required to verify GitHub prerelease status',
+  );
   assert.equal(release.draft, false, 'GitHub release is still a draft');
   assert.equal(release.immutable, true, 'published release is not immutable');
+  assert.equal(
+    release.prerelease,
+    version.split('+', 1)[0].includes('-'),
+    'GitHub prerelease status does not match package version',
+  );
   const assets = new Set(release.assets.map((asset) => asset.name));
   for (const name of expectedAssets)
     assert(
@@ -386,15 +395,16 @@ async function assertReleaseSettings() {
 
 async function releaseState() {
   const tag = process.env.RELEASE_TAG;
+  const version = process.env.RELEASE_VERSION;
   const releases = await githubList('releases?per_page=100');
   const release = releases.find((item) => item.tag_name === tag);
   const state = releaseStateForTag(releases, tag);
   if (state.exists && !state.draft)
-    verifyPublishedRelease(release, [
-      process.env.TARBALL_NAME,
-      'manifest.json',
-      'sbom.cdx.json',
-    ]);
+    verifyPublishedRelease(
+      release,
+      [process.env.TARBALL_NAME, 'manifest.json', 'sbom.cdx.json'],
+      version,
+    );
   writeFileSync(
     process.env.GITHUB_OUTPUT,
     `exists=${state.exists}\ndraft=${state.draft}\nid=${state.id}\naction=${state.action}\n`,

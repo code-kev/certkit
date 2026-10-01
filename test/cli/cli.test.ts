@@ -130,4 +130,69 @@ describe('CLI skeleton', () => {
     expect(result.stderr).toContain('USAGE');
     expect(result.stderr).toContain('Unknown command: constructor');
   });
+
+  it.each([
+    ['create --unknown', ['create', '--unknown']],
+    ['global unknown before command', ['--unknown', 'create']],
+    ['unknown option with a value', ['create', '--unknown=value']],
+    ['unknown short option', ['create', '-x']],
+  ])('rejects %s before creating the CA directory', async (_label, args) => {
+    const root = mkdtempSync(join(tmpdir(), 'certkit-cli-invalid-options-'));
+    const caDir = join(root, 'ca');
+    process.env.CERTKIT_HOME = caDir;
+    const result = await run([process.execPath, cli, ...args]);
+
+    expect(result.code).toBe(2);
+    expect(result.stdout).toBe('');
+    expect(result.stderr).toContain('INVALID_OPTIONS');
+    expect(existsSync(caDir)).toBe(false);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('reports invalid options as schema-versioned JSON', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'certkit-cli-invalid-json-'));
+    process.env.CERTKIT_HOME = join(root, 'ca');
+    for (const args of [
+      ['--json', 'create', '--bad=value'],
+      ['create', '--json=true', '--bad=value'],
+      ['create', '--json=FALSE', '--bad=value'],
+    ]) {
+      const result = await run([process.execPath, cli, ...args]);
+      expect(result.code).toBe(2);
+      expect(result.stderr).toBe('');
+      expect(JSON.parse(result.stdout)).toEqual({
+        schemaVersion: 1,
+        error: {
+          code: 'INVALID_OPTIONS',
+          message: expect.stringContaining('--bad'),
+        },
+      });
+    }
+    expect(existsSync(join(root, 'ca'))).toBe(false);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('preserves declared aliases and the -- positional delimiter', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'certkit-cli-options-valid-'));
+    process.env.CERTKIT_HOME = join(root, 'ca');
+    const help = await run([process.execPath, cli, '--help']);
+    const alias = await run([process.execPath, cli, 'create', '-o', root]);
+    const positional = await run([
+      process.execPath,
+      cli,
+      'create',
+      '--',
+      '--bad',
+    ]);
+
+    expect(help.code).toBe(0);
+    expect(help.stdout).toContain('USAGE');
+    expect(alias.code).toBe(2);
+    expect(alias.stderr).toContain('INVALID_NAME');
+    expect(alias.stderr).not.toContain('INVALID_OPTIONS');
+    expect(positional.code).toBe(2);
+    expect(positional.stderr).toContain('INVALID_NAME');
+    expect(positional.stderr).not.toContain('INVALID_OPTIONS');
+    rmSync(root, { recursive: true, force: true });
+  });
 });

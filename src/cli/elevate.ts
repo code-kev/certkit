@@ -31,7 +31,9 @@ export function elevate(argv: string[]): Promise<void> {
     );
 
   return new Promise((resolve, reject) => {
-    const child = spawn('sudo', argv, { stdio: 'inherit' });
+    const child = spawn('sudo', argv, {
+      stdio: ['inherit', process.stderr.fd, 'inherit'],
+    });
     child.on('error', () =>
       reject(
         new CertkitError(
