@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.0-beta.2
+
+### Patch Changes
+
+- 9daf24d: Reject unknown CLI options before commands run, validate DNS names before URL normalization, keep sudo output off JSON stdout, and detect Linux trust tools from PATH without `which`.
+
 ## 1.0.0-beta.1
 
 This is certkit's first public prerelease. It provides a JavaScript library for generating locally trusted development certificates, a CLI for creating certificates and installing, inspecting, or removing CA trust, and a Vite 7/8 plugin for opt-in HTTPS.
