@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
+import { setTimeout } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
 import { checkConsumerTree } from './check-deps.mjs';
 
@@ -253,6 +254,51 @@ export function verifyPublishedRelease(release, expectedAssets, version) {
     );
 }
 
+export function verifyDraftRelease(release, id, expectedAssets, version) {
+  assert.equal(release.id, id, 'GitHub draft ID changed');
+  verifyTagVersion(release.tag_name, version);
+  assert.equal(release.draft, true, 'GitHub release must still be a draft');
+  assert.equal(
+    release.prerelease,
+    version.split('+', 1)[0].includes('-'),
+    'GitHub draft prerelease status does not match package version',
+  );
+  const assets = new Set(release.assets.map((asset) => asset.name));
+  for (const name of expectedAssets)
+    assert(assets.has(name), `GitHub draft is missing ${name}`);
+}
+
+async function registryVersion(version) {
+  const response = await fetch(
+    `https://registry.npmjs.org/certkit/${encodeURIComponent(version)}`,
+    { signal: AbortSignal.timeout(5000) },
+  );
+  if (response.status === 404) return undefined;
+  if (!response.ok)
+    throw new Error(`npm registry query failed: ${response.status}`);
+  return response.json();
+}
+
+export async function waitForRegistryIntegrity(
+  manifest,
+  { attempts = 20, delayMs = 15000 } = {},
+) {
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    const published = await registryVersion(manifest.version);
+    if (published) {
+      verifyRegistryIntegrity(manifest, published.dist?.integrity);
+      return;
+    }
+    if (attempt < attempts) {
+      console.log(`waiting for npm processing: ${attempt}/${attempts}`);
+      await setTimeout(delayMs);
+    }
+  }
+  throw new Error(
+    'published npm version is not available within the wait limit',
+  );
+}
+
 export function writeManifest(tarball, manifestPath, { sha, version, runId }) {
   const bytes = readFileSync(tarball);
   writeFileSync(
@@ -433,17 +479,22 @@ async function main() {
   } else if (command === 'resolve-artifact') {
     await resolveArtifact();
   } else if (command === 'state') {
-    const url = `https://registry.npmjs.org/certkit/${encodeURIComponent(process.env.RELEASE_VERSION)}`;
-    const response = await fetch(url);
-    if (response.status === 404) {
+    const published = await registryVersion(process.env.RELEASE_VERSION);
+    if (!published) {
       console.log('published=false');
       return;
     }
-    if (!response.ok)
-      throw new Error(`npm registry query failed: ${response.status}`);
-    const published = await response.json();
     console.log('published=true');
     console.log(`integrity=${published.dist?.integrity ?? ''}`);
+  } else if (command === 'wait-registry') {
+    await waitForRegistryIntegrity(JSON.parse(readFileSync(args[0], 'utf8')));
+  } else if (command === 'verify-draft') {
+    verifyDraftRelease(
+      JSON.parse(readFileSync(args[0], 'utf8')),
+      Number(process.env.DRAFT_ID),
+      [process.env.TARBALL_NAME, 'manifest.json', 'sbom.cdx.json'],
+      process.env.RELEASE_VERSION,
+    );
   } else if (command === 'manifest') {
     writeManifest(args[0], args[1], {
       sha: process.env.RELEASE_SHA,
