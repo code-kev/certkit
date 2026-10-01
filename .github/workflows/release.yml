@@ -505,12 +505,11 @@ jobs:
           DRAFT_ID: ${{ steps.draft_release.outputs.id }}
           RELEASE_VERSION: ${{ needs.validate.outputs.version }}
           RELEASE_TAG: ${{ needs.validate.outputs.tag }}
-          RELEASE_SHA: ${{ needs.validate.outputs.selected }}
         run: |
           test -n "$DRAFT_ID"
           prerelease=false
           if [[ "${RELEASE_VERSION%%+*}" == *-* ]]; then prerelease=true; fi
-          gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$DRAFT_ID" --raw-field tag_name="$RELEASE_TAG" --raw-field target_commitish="$RELEASE_SHA" --field prerelease="$prerelease"
+          gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$DRAFT_ID" --raw-field tag_name="$RELEASE_TAG" --field prerelease="$prerelease"
       - name: Verify draft before publishing
         if: steps.release_state.outputs.exists != 'true' || steps.release_state.outputs.draft == 'true'
         env:
@@ -530,11 +529,10 @@ jobs:
           DRAFT_ACTION: ${{ steps.draft_release.outputs.action }}
           DRAFT_ID: ${{ steps.draft_release.outputs.id }}
           RELEASE_TAG: ${{ needs.validate.outputs.tag }}
-          RELEASE_SHA: ${{ needs.validate.outputs.selected }}
         run: |
           test "$DRAFT_ACTION" = edit
           test -n "$DRAFT_ID"
-          gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$DRAFT_ID" --raw-field tag_name="$RELEASE_TAG" --raw-field target_commitish="$RELEASE_SHA" --field draft=false
+          gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$DRAFT_ID" --raw-field tag_name="$RELEASE_TAG" --field draft=false
       - name: Verify published release immutability and assets
         env:
           GITHUB_TOKEN: ${{ github.token }}
