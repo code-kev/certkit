@@ -756,7 +756,7 @@ try {
   const ghCapture = join(prereleaseFixture, 'gh-args.txt');
   writeFileSync(
     join(bin, 'gh'),
-    '#!/bin/sh\nprintf "%s\\n" "$*" >> "$GH_CAPTURE"\nif [ "$1" = api ] && [ "$2" != --method ]; then cat "$GH_DRAFT_JSON"; fi\n',
+    '#!/bin/sh\nfor arg in "$@"; do case "$arg" in target_commitish=*) echo "fixture: target_commitish requires unavailable workflow permission" >&2; exit 1;; esac; done\nprintf "%s\\n" "$*" >> "$GH_CAPTURE"\nif [ "$1" = api ] && [ "$2" != --method ]; then cat "$GH_DRAFT_JSON"; fi\n',
     { mode: 0o755 },
   );
   for (const [version, expectedValue] of [
@@ -793,10 +793,7 @@ try {
         `--raw-field tag_name=v${version}`,
       ),
     );
-    assert.match(
-      readFileSync(ghCapture, 'utf8'),
-      /--raw-field target_commitish=a{40}/,
-    );
+    assert.doesNotMatch(readFileSync(ghCapture, 'utf8'), /target_commitish/);
     writeFileSync(ghCapture, '');
   }
   mkdirSync(join(prereleaseFixture, 'release'));
@@ -867,10 +864,7 @@ try {
     readFileSync(ghCapture, 'utf8'),
     /--raw-field tag_name=v1\.0\.0-beta\.2/,
   );
-  assert.match(
-    readFileSync(ghCapture, 'utf8'),
-    /--raw-field target_commitish=a{40}/,
-  );
+  assert.doesNotMatch(readFileSync(ghCapture, 'utf8'), /target_commitish/);
   assert.match(readFileSync(ghCapture, 'utf8'), /--field draft=false/);
   assert.ok(
     releaseWorkflow.indexOf('- name: Verify draft before publishing') <
