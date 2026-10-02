@@ -395,9 +395,12 @@ jobs:
         env:
           PACKAGE_PUBLISHED: ${{ steps.registry.outputs.published }}
         run: test "$PACKAGE_PUBLISHED" = true
-      - name: Install OIDC-capable npm CLI
+      - name: Require an OIDC-capable npm CLI
         if: steps.registry.outputs.published != 'true' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.resume_tagged_release))
-        run: npm install --global npm@11.5.1 # zizmor: ignore[adhoc-packages] trusted publishing requires npm >=11.5.1.
+        run: |
+          version="$(npm --version)"
+          node -e 'const [major, minor] = process.argv[1].split(".").map(Number); if (major < 11 || (major === 11 && minor < 5)) { console.error("npm " + process.argv[1] + " is older than the 11.5.1 floor required for OIDC trusted publishing"); process.exit(1); }' "$version"
+          echo "npm $version satisfies the OIDC trusted-publishing floor"
       - name: Publish the tested tarball by OIDC
         if: steps.registry.outputs.published != 'true' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.resume_tagged_release))
         env:
