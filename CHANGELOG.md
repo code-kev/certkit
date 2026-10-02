@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.0-beta.3
+
+### Patch Changes
+
+- b226af4: Add npm discovery keywords and make the Vite example preview follow the light/dark theme.
+
 ## 1.0.0-beta.2
 
 ### Patch Changes
