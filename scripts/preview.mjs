@@ -16,7 +16,7 @@ import {
 } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
-import { dirname, extname, join, resolve } from 'node:path';
+import { dirname, extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -52,7 +52,12 @@ function serve(dir) {
     const server = createServer((request, response) => {
       const name =
         request.url === '/' ? 'index.html' : request.url.split('?')[0];
-      const path = join(dir, decodeURIComponent(name));
+      // A request URL can escape the built example; keep every read inside it.
+      const path = resolve(dir, decodeURIComponent(name).replace(/^\/+/, ''));
+      if (!path.startsWith(dir + sep)) {
+        response.writeHead(403).end();
+        return;
+      }
       try {
         const body = readFileSync(path);
         response.writeHead(200, {
