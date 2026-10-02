@@ -17,7 +17,7 @@
 
 certkit creates a private local certificate authority and leaf certificates in JavaScript, then installs that CA in supported local trust stores. Use it as a library, CLI, or Vite plugin. It makes no network calls. Linux browser trust needs the system `certutil` tool (package: `libnss3-tools` on Debian/Ubuntu, `nss-tools` on Fedora).
 
-> certkit is in beta. `1.0.0-beta.2` is the current prerelease and both npm dist-tags resolve to it, so the commands below and a plain `npm install certkit` install the same build today. Prefer `certkit@beta` in scripts and CI: a new prerelease refreshes the `beta` tag automatically, while `latest` moves only when a stable version ships.
+> certkit is in beta. Prereleases publish under npm's `beta` dist-tag, so `certkit@beta` always resolves to the newest prerelease. `latest` moves only when a stable version ships, or when a maintainer repoints it, so prefer `certkit@beta` in scripts and CI.
 
 ## Why certkit
 
@@ -115,7 +115,7 @@ See the [trust matrix](docs/trust-matrix.md) for verification levels, platform v
 
 | Project | Documented mechanism and scope |
 | --- | --- |
-| **certkit** | `1.0.0-beta.2` prerelease: JavaScript library, CLI, and Vite plugin; generates a per-user CA and leaf certs; installs in supported OS and NSS stores. Requires Node 22.15.0+. Linux NSS requires system `certutil`. |
+| **certkit** | prerelease: JavaScript library, CLI, and Vite plugin; generates a per-user CA and leaf certs; installs in supported OS and NSS stores. Requires Node 22.15.0+. Linux NSS requires system `certutil`. |
 | [mkcert](https://github.com/FiloSottile/mkcert) | Go command-line program; upstream documents installation via package manager, source build, or prebuilt binary; installs roots into OS, Firefox/Chromium NSS, and optional Java stores. Node recipe uses `NODE_EXTRA_CA_CERTS`. |
 | [vite-plugin-mkcert](https://github.com/liuweiGL/vite-plugin-mkcert) | Vite plugin that uses the mkcert executable; upstream documents downloading/upgrading it, a configurable binary path, and proxy/download-source settings. Its README lists Node 22.19.0+. |
 | [@vitejs/plugin-basic-ssl](https://github.com/vitejs/vite-plugin-basic-ssl) | Vite plugin that generates a self-signed, untrusted certificate; browsers show a warning/interstitial before access. |
