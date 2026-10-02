@@ -18,6 +18,7 @@ This matrix reports observed combinations, not a promise that every OS/browser r
 | WSL2 Ubuntu 24.04 | Linux system trust and Windows isolation | Best effort | Machine-verified · 2026-09-30 | WSL2 2.7.14.0, kernel 6.18.33.2. Linux trust succeeds inside WSL; Windows browsers do not inherit it. Install in Windows for those browsers. |
 | WSL1 | Linux system trust and browser behavior | Best effort | Pending · — | No WSL1 result is claimed. |
 | Any OS | NSS `cert8.db`-only profile | Unsupported | Not applicable · — | Legacy `cert8.db`-only databases are unsupported. |
+| Any OS | Java truststore (`cacerts`) | Unsupported | Not applicable · — | certkit neither reads nor writes Java truststores: trust is per JDK installation rather than per user, `cacerts` is normally package-manager-owned, and writing it needs the store password. Import certkit's CA into a truststore you control instead. |
 | Linux with `/etc/pki/nssdb` target | System NSS database | Best effort / manual-only | Design limit · v1 | `status` can inspect it; certkit does not write it or elevate for it. Use documented manual steps with `sudo` throughout. |
 | Windows localized builds | Current-user store / CLI text | Supported | Pending · — | No localized Windows result is claimed. |
 
