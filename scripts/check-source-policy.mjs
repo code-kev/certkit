@@ -18,6 +18,10 @@ for (const file of files) {
   const text = staged
     ? execFileSync('git', ['show', `:${file}`], { encoding: 'utf8' })
     : readFileSync(file, 'utf8');
+  if (file === 'README.md' && /\d+\.\d+\.\d+-beta\.\d+/.test(text))
+    errors.push(
+      `${file}: pins a prerelease version; describe the dist-tag instead`,
+    );
   for (const [index, line] of text.split('\n').entries()) {
     if (/(?<![\w.])dev\/|\b(?:SPEC|ADR)-\d+/.test(line))
       errors.push(`${file}:${index + 1}: private artifact reference`);

@@ -39,8 +39,14 @@ try {
     '// TO' + 'DO: https://github.com/code-kev/certkit/issues/123\n',
   );
   assert.equal(check().status, 0);
+  const readme = join(root, 'README.md');
+  writeFileSync(readme, '> certkit@beta tracks the newest prerelease.\n');
+  git('add', '.');
+  assert.equal(check().status, 0);
+  writeFileSync(readme, '> currently 1.0.0-beta.3\n');
+  assert.equal(check().status, 1);
   console.log(
-    'Source policy rejects private pointers and unlinked TODOs, including staged content.',
+    'Source policy rejects private pointers, unlinked TODOs, and README prerelease pins.',
   );
 } finally {
   rmSync(root, { recursive: true, force: true });
