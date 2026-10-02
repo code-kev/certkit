@@ -216,3 +216,50 @@ footer {
     gap: 8px;
   }
 }
+@media (prefers-color-scheme: light) {
+  :root {
+    color-scheme: light;
+    color: #242522;
+    background: #f2efe7;
+  }
+  body {
+    background: #f2efe7;
+  }
+  .topbar {
+    border-bottom-color: #d5d1c6;
+  }
+  .topbar-label,
+  .eyebrow,
+  .setup-note,
+  .detail-note,
+  footer {
+    color: #55554e;
+  }
+  .summary {
+    color: #55554e;
+  }
+  .setup {
+    border-top-color: #b9b5aa;
+  }
+  .command {
+    border-color: #d5d1c6;
+    background: #e7e3d8;
+    color: #242522;
+  }
+  .prompt {
+    color: #6b6a62;
+  }
+  .details {
+    border-top-color: #b9b5aa;
+  }
+  .detail + .detail {
+    border-left-color: #d5d1c6;
+    border-top-color: #d5d1c6;
+  }
+  footer {
+    border-top-color: #d5d1c6;
+  }
+  :focus-visible {
+    outline-color: #242522;
+  }
+}

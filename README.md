@@ -83,9 +83,15 @@ export default defineConfig({
 
 Run `npx certkit@beta install` once before `vite`. HTTPS is opt-in: `server.https: {}` requests it. The plugin fails startup when all detected browser trust targets are untrusted, and warns about uncertain or untrusted targets. If no browser target is detected, trust remains uncertain.
 
-![Visual preview of the Vite example](assets/vite-example-preview.png)
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/vite-example-preview-dark.png">
+    <source media="(prefers-color-scheme: light)" srcset="assets/vite-example-preview-light.png">
+    <img src="assets/vite-example-preview-light.png" alt="Visual preview of the certkit Vite example: a local HTTPS landing page rendered in the light theme" width="900">
+  </picture>
+</p>
 
-This screenshot was rendered from the example over local HTTP with the certkit plugin disabled. It shows the page layout only; it does not verify HTTPS or browser trust.
+This screenshot was rendered from the example over local HTTP with the certkit plugin disabled. It shows the page layout in the light and dark themes only; it does not verify HTTPS or browser trust.
 
 #### CLI
 
