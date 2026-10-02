@@ -33,9 +33,10 @@ List the development CAs in each store:
 
 ```sh
 ls /usr/local/share/ca-certificates/
+# openssl prints the subject before the fingerprint, so pair the two lines
 awk -v cmd='openssl x509 -noout -subject -fingerprint -sha256' \
   '/BEGIN CERTIFICATE/{close(cmd)};{print|cmd}' /etc/ssl/certs/ca-certificates.crt \
-  | grep -B1 -i 'mkcert\|devcert\|certkit'
+  | paste - - | grep -i 'mkcert\|devcert\|certkit'
 ```
 
 **NSS profiles** (the same `sql:` databases certkit uses; the loop skips profiles that do not exist)
