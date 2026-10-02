@@ -2,6 +2,10 @@
 
 Bug reports, reproducible platform results, documentation fixes, and focused code changes are welcome. Please read the [Code of Conduct](CODE_OF_CONDUCT.md) before participating.
 
+## Questions and ideas
+
+Usage questions, setup help, and proposals belong in [Discussions](https://github.com/code-kev/certkit/discussions). Use the issue forms for reproducible bugs and scoped feature requests, and [report vulnerabilities privately](https://github.com/code-kev/certkit/security/advisories/new) instead of in a public thread.
+
 ## Before opening an issue
 
 - Search existing issues and pull requests.
