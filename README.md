@@ -17,7 +17,7 @@
 
 certkit creates a private local certificate authority and leaf certificates in JavaScript, then installs that CA in supported local trust stores. Use it as a library, CLI, or Vite plugin. It makes no network calls. Linux browser trust needs the system `certutil` tool (package: `libnss3-tools` on Debian/Ubuntu, `nss-tools` on Fedora).
 
-> certkit is in beta. `1.0.0-beta.2` is the current prerelease on npm's `beta` dist-tag, and the commands below install it as `certkit@beta`. Because npm assigned its required `latest` tag at the first publish and a prerelease does not move it, unqualified `npm install certkit` still resolves the first beta (`1.0.0-beta.1`) until a stable version is published.
+> certkit is in beta. `1.0.0-beta.2` is the current prerelease and both npm dist-tags resolve to it, so the commands below and a plain `npm install certkit` install the same build today. Prefer `certkit@beta` in scripts and CI: a new prerelease refreshes the `beta` tag automatically, while `latest` moves only when a stable version ships.
 
 ## Why certkit
 
