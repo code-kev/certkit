@@ -3,3 +3,6 @@ contact_links:
   - name: Report a security vulnerability privately
     url: https://github.com/code-kev/certkit/security/advisories/new
     about: Do not report security vulnerabilities in public issues.
+  - name: Ask a question or share an idea
+    url: https://github.com/code-kev/certkit/discussions
+    about: Usage questions, setup help, and ideas live in Discussions.
