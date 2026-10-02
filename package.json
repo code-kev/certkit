@@ -1,6 +1,6 @@
 {
   "name": "certkit",
-  "version": "1.0.0-beta.2",
+  "version": "1.0.0-beta.3",
   "description": "Trusted local HTTPS development certificates",
   "keywords": [
     "https",
