@@ -561,14 +561,19 @@ assert.doesNotMatch(sourceScript, /RESUME_TAGGED_RELEASE/);
 const registryGuardIndex = releaseWorkflow.indexOf(
   '- name: Require published version before metadata recovery',
 );
-const installNpmIndex = releaseWorkflow.indexOf(
-  '- name: Install OIDC-capable npm CLI',
+const npmFloorIndex = releaseWorkflow.indexOf(
+  '- name: Require an OIDC-capable npm CLI',
 );
 const publishNpmIndex = releaseWorkflow.indexOf(
   '- name: Publish the tested tarball by OIDC',
 );
 assert.ok(
-  registryGuardIndex < installNpmIndex && installNpmIndex < publishNpmIndex,
+  registryGuardIndex < npmFloorIndex && npmFloorIndex < publishNpmIndex,
+);
+assert.doesNotMatch(
+  releaseWorkflow,
+  /npm install --global/,
+  'release publishing must not install an unpinned global npm',
 );
 assert.match(
   releaseWorkflow,
