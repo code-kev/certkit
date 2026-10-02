@@ -415,6 +415,19 @@ jobs:
         env:
           RELEASE_VERSION: ${{ needs.validate.outputs.version }}
         run: node release-controls/scripts/release.mjs wait-registry release/manifest.json
+      - name: Keep latest on the newest prerelease while it tracks one
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.resume_tagged_release)
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          if [[ "${RELEASE_VERSION%%+*}" != *-* ]]; then exit 0; fi
+          current="$(npm view certkit dist-tags.latest)"
+          if [[ "$current" != *-* ]]; then exit 0; fi
+          # OIDC dist-tag writes need the trusted publisher's "manage dist-tags"
+          # action. Warn instead of failing the release when it is not enabled.
+          if ! npm dist-tag add "certkit@$RELEASE_VERSION" latest; then
+            echo "::warning::latest still points at $current; enable 'manage dist-tags' on the npm trusted publisher or run: npm dist-tag add certkit@$RELEASE_VERSION latest"
+          fi
       - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
         with:
           artifact-ids: ${{ needs.consumer-smoke.outputs.metadata_artifact_id }}
