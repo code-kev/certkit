@@ -17,7 +17,7 @@ The initial version starts before a tag exists:
 
 The workflow never stores an npm token. The bootstrap dispatch stops before the OIDC publish job.
 
-For the first beta, `npm publish --tag beta` also assigns npm's required `latest` dist-tag. Until a stable version is published, unqualified `npm install certkit` therefore resolves the beta; `npm install certkit@beta` selects it explicitly. npm requires a `latest` dist-tag for every package and rejects attempts to remove it.
+For the first beta, `npm publish --tag beta` still leaves npm's required `latest` dist-tag on that first prerelease, and npm rejects attempts to remove `latest`. Until a stable version is published, unqualified `npm install certkit` therefore resolves `1.0.0-beta.1` rather than the newest prerelease; `npm install certkit@beta` selects the current prerelease explicitly. To make plain installs follow the newest prerelease sooner, move the tag by hand: `npm dist-tag add certkit@<version> latest`.
 
 ## Recovering published release metadata
 
