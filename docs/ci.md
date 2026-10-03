@@ -16,11 +16,14 @@ establish coverage for other Windows releases or locales; see the
 The frozen pnpm install applies `patches/braces@3.0.3.patch` for
 [GHSA-vfj7-8cjw-p6xm](https://github.com/advisories/GHSA-vfj7-8cjw-p6xm).
 It caps parser nesting and direct AST walker depth at 100 before recursive
-processing. The cap also covers parentheses and cannot be raised by a caller
-option. This is a temporary backport based on
+processing. The cap also covers parentheses; callers may lower it with
+`maxDepth`, while invalid or larger values cannot disable or raise the hard
+cap. Expanding caller-supplied ASTs also rejects cyclic parent chains. This is a
+temporary backport based on
 [the upstream fix](https://github.com/micromatch/braces/pull/72).
 `node test/brace-depth.negative.mjs` checks the actual Changesets transitive
-dependency, including escaped/quoted patterns and direct AST calls.
+dependency, including escaped/quoted patterns, direct AST calls, and cyclic
+AST parent chains.
 
 This dependency is used by development tooling and is absent from certkit's
 production dependency closure. The installed package still reports version

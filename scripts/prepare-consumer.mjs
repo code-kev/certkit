@@ -13,12 +13,20 @@ export function bindConsumerLock(anchor, manifest, pkg) {
   );
   const locked = anchor.packages?.['node_modules/certkit'];
   assert(locked, 'consumer lockfile must contain the certkit root');
-  assert.equal(manifest.name, 'certkit', 'consumer package identity mismatch');
-  assert.equal(pkg.name, manifest.name, 'consumer package identity mismatch');
+  assert.equal(
+    manifest.name,
+    'certkit',
+    'release manifest package name must be certkit',
+  );
+  assert.equal(
+    pkg.name,
+    manifest.name,
+    'tarball package name differs from release manifest',
+  );
   assert.equal(
     pkg.version,
     manifest.version,
-    'consumer package identity mismatch',
+    'tarball package version differs from release manifest',
   );
   assert.match(
     manifest.integrity,

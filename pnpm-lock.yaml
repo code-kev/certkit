@@ -6,7 +6,7 @@ settings:
 
 patchedDependencies:
   braces@3.0.3:
-    hash: b8cdd2ea7af9a4e98f35cc52a6637fcca5c91f199ef474d365443ee171ed7324
+    hash: bfdb0c171556074c2785f98d0a7355209223df8e29dbc2ff489240c16a47da97
     path: patches/braces@3.0.3.patch
 
 importers:
@@ -3528,7 +3528,7 @@ snapshots:
     dependencies:
       is-windows: 1.0.2
 
-  braces@3.0.3(patch_hash=b8cdd2ea7af9a4e98f35cc52a6637fcca5c91f199ef474d365443ee171ed7324):
+  braces@3.0.3(patch_hash=bfdb0c171556074c2785f98d0a7355209223df8e29dbc2ff489240c16a47da97):
     dependencies:
       fill-range: 7.1.1
 
@@ -4021,7 +4021,7 @@ snapshots:
 
   micromatch@4.0.8:
     dependencies:
-      braces: 3.0.3(patch_hash=b8cdd2ea7af9a4e98f35cc52a6637fcca5c91f199ef474d365443ee171ed7324)
+      braces: 3.0.3(patch_hash=bfdb0c171556074c2785f98d0a7355209223df8e29dbc2ff489240c16a47da97)
       picomatch: 2.3.2
 
   minimist@1.2.8: {}

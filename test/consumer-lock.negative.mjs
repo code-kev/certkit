@@ -37,6 +37,10 @@ assert.equal(
   manifest.integrity,
 );
 assert.equal(anchor.packages['node_modules/certkit'].version, '0.0.0');
+assert.equal(
+  Object.hasOwn(anchor.packages['node_modules/certkit'], 'integrity'),
+  false,
+);
 for (const [path, entry] of Object.entries(anchor.packages)) {
   if (path !== 'node_modules/certkit')
     assert.deepEqual(bound.packages[path], entry);
@@ -58,11 +62,15 @@ assert.throws(
 );
 assert.throws(
   () => bindConsumerLock(anchor, { ...manifest, name: 'other' }, pkg),
-  /identity/,
+  /manifest package name/,
+);
+assert.throws(
+  () => bindConsumerLock(anchor, manifest, { ...pkg, name: 'other' }),
+  /tarball package name/,
 );
 assert.throws(
   () => bindConsumerLock(anchor, { ...manifest, version: '2.0.0' }, pkg),
-  /identity/,
+  /tarball package version/,
 );
 for (const replacement of [
   { resolved: 'https://untrusted.invalid/package.tgz' },

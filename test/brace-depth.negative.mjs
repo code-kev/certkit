@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 
 // Temporary backport of upstream's depth-limit fix: https://github.com/micromatch/braces/pull/72
@@ -23,6 +24,12 @@ for (const [pattern, output] of [
 ]) {
   assert.deepEqual(braces(pattern), output);
   assert.deepEqual(braces(pattern, { expand: true }), output);
+}
+for (const pattern of ['{{a}}', '{a,{b}}', '{{x}y}', '{a,{b,{c}}', '{}{a}']) {
+  assert.equal(
+    braces.stringify(braces.parse(pattern), { escapeInvalid: true }),
+    pattern,
+  );
 }
 
 for (const [open, close] of [
@@ -55,6 +62,17 @@ for (const [open, close] of [
   }
 }
 
+assert.throws(() => braces.parse('{{a,b},c}', { maxDepth: 1 }), /max depth/i);
+assert.doesNotThrow(() => braces.parse('{{a,b},c}', { maxDepth: 2 }));
+assert.throws(() => braces.parse('{{a,b},c}', { maxDepth: 1.5 }), /max depth/i);
+const overLimitPattern = `${'{'.repeat(101)}leaf${'}'.repeat(101)}`;
+for (const invalidMaxDepth of [Number.NaN, Number.POSITIVE_INFINITY, '1']) {
+  assert.throws(
+    () => braces.parse(overLimitPattern, { maxDepth: invalidMaxDepth }),
+    /max depth/i,
+  );
+}
+
 const makeNestedAst = (depth) => {
   let node = { type: 'text', value: 'leaf' };
   for (let index = 0; index < depth; index++) {
@@ -84,6 +102,55 @@ for (const call of [
     braces.stringify(makeNestedAst(101), { maxDepth: Number.MAX_SAFE_INTEGER }),
 ]) {
   assert.throws(call, /max depth/i);
+}
+
+for (const call of [
+  () => braces.compile(makeNestedAst(2), { maxDepth: 1 }),
+  () => braces.expand(makeNestedAst(2), { maxDepth: 1 }),
+  () => braces.stringify(makeNestedAst(2), { maxDepth: 1 }),
+]) {
+  assert.throws(call, /max depth/i);
+}
+
+for (const call of [
+  () => braces.compile(makeNestedAst(100).nodes[0]),
+  () => braces.expand(makeNestedAst(100).nodes[0]),
+  () => braces.stringify(makeNestedAst(100).nodes[0]),
+]) {
+  assert.doesNotThrow(call);
+}
+for (const call of [
+  () => braces.compile(makeNestedAst(101).nodes[0]),
+  () => braces.expand(makeNestedAst(101).nodes[0]),
+  () => braces.stringify(makeNestedAst(101).nodes[0]),
+]) {
+  assert.throws(call, /max depth/i);
+}
+
+const cycleScript = `
+  const braces = require(process.env.CERTKIT_BRACES_ENTRY);
+  const ast = { type: 'paren', nodes: [{ type: 'paren', nodes: [{ type: 'text', value: 'a' }] }] };
+  if (process.env.CERTKIT_CYCLE === 'self') ast.parent = ast;
+  else ast.parent = { type: 'paren', parent: ast };
+  braces.expand(ast);
+`;
+for (const cycle of ['self', 'multiple']) {
+  const result = spawnSync(process.execPath, ['-e', cycleScript], {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      CERTKIT_BRACES_ENTRY: bracesPath,
+      CERTKIT_CYCLE: cycle,
+    },
+    timeout: 2_000,
+  });
+  assert.notEqual(
+    result.error?.code,
+    'ETIMEDOUT',
+    'cyclic AST expansion must not hang',
+  );
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /AST parent chain contains a cycle/);
 }
 
 const deepBraceLiteral = '{'.repeat(101);

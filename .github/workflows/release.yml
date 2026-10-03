@@ -271,6 +271,12 @@ jobs:
         with:
           ref: ${{ needs.validate.outputs.selected }}
           persist-credentials: false
+      - name: Check out consumer controls
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: release-controls
+          persist-credentials: false
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: '24'
@@ -288,10 +294,10 @@ jobs:
           ARTIFACT_RUN_ID: ${{ needs.produce.outputs.run_id }}
         run: |
           tarball="$(find release -maxdepth 1 -name 'certkit-*.tgz' -type f -print -quit)"
-          node scripts/prepare-consumer.mjs "$tarball" release/manifest.json consumer
+          node release-controls/scripts/prepare-consumer.mjs "$tarball" release/manifest.json consumer
           cd consumer
           npm ci --ignore-scripts --no-audit --no-fund
-          node "$GITHUB_WORKSPACE/scripts/check-deps.mjs" --consumer-tree "$PWD"
+          node "$GITHUB_WORKSPACE/release-controls/scripts/check-deps.mjs" --consumer-tree "$PWD"
       - name: Check exports, declarations and CLI
         env:
           RELEASE_VERSION: ${{ needs.validate.outputs.version }}
