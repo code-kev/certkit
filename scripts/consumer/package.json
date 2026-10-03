@@ -1,0 +1,8 @@
+{
+  "name": "certkit-release-consumer",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "certkit": "file:certkit.tgz"
+  }
+}
