@@ -25,10 +25,158 @@ import {
   verifyManifest,
   verifyPublishedRelease,
   verifyRegistryIntegrity,
+  verifyReleaseSettings,
   verifyRepository,
   verifyTagVersion,
   waitForRegistryIntegrity,
 } from '../scripts/release.mjs';
+
+const releaseSettings = () => ({
+  immutable: { enabled: true },
+  environment: {
+    can_admins_bypass: false,
+    protection_rules: [
+      {
+        type: 'required_reviewers',
+        prevent_self_review: true,
+        reviewers: [
+          { type: 'User', reviewer: { id: 163148490, login: 'code-kev' } },
+          {
+            type: 'User',
+            reviewer: { id: 260122931, login: 'spencermbawe' },
+          },
+        ],
+      },
+    ],
+    deployment_branch_policy: {
+      protected_branches: false,
+      custom_branch_policies: true,
+    },
+  },
+  deploymentPolicies: {
+    total_count: 2,
+    branch_policies: [
+      { name: 'main', type: 'branch' },
+      { name: 'v*', type: 'tag' },
+    ],
+  },
+});
+const validReleaseSettings = releaseSettings();
+verifyReleaseSettings(
+  validReleaseSettings.immutable,
+  validReleaseSettings.environment,
+  validReleaseSettings.deploymentPolicies,
+);
+for (const [label, mutate] of [
+  [
+    'immutable releases disabled',
+    (settings) => {
+      settings.immutable.enabled = false;
+    },
+  ],
+  [
+    'environment self-review enabled',
+    (settings) => {
+      settings.environment.protection_rules[0].prevent_self_review = false;
+    },
+  ],
+  [
+    'environment admin bypass enabled',
+    (settings) => {
+      settings.environment.can_admins_bypass = true;
+    },
+  ],
+  [
+    'missing environment admin bypass setting',
+    (settings) => {
+      delete settings.environment.can_admins_bypass;
+    },
+  ],
+  [
+    'nested reviewer property cannot override environment admin bypass',
+    (settings) => {
+      settings.environment.can_admins_bypass = true;
+      settings.environment.protection_rules[0].can_admins_bypass = false;
+    },
+  ],
+  [
+    'unknown reviewer',
+    (settings) => {
+      settings.environment.protection_rules[0].reviewers[1].reviewer.id = 7;
+    },
+  ],
+  [
+    'additional reviewer',
+    (settings) => {
+      settings.environment.protection_rules[0].reviewers.push({
+        type: 'User',
+        reviewer: { id: 7 },
+      });
+    },
+  ],
+  [
+    'team reviewer',
+    (settings) => {
+      settings.environment.protection_rules[0].reviewers[1].type = 'Team';
+    },
+  ],
+  [
+    'missing reviewer rule',
+    (settings) => {
+      settings.environment.protection_rules = [];
+    },
+  ],
+  [
+    'duplicate reviewer identity',
+    (settings) => {
+      settings.environment.protection_rules[0].reviewers[1].reviewer.id = 163148490;
+    },
+  ],
+  [
+    'broad deployment refs',
+    (settings) => {
+      settings.deploymentPolicies.branch_policies[1] = {
+        name: '*',
+        type: 'branch',
+      };
+    },
+  ],
+  [
+    'missing deployment ref',
+    (settings) => {
+      settings.deploymentPolicies.branch_policies.pop();
+      settings.deploymentPolicies.total_count = 1;
+    },
+  ],
+  [
+    'duplicate deployment ref',
+    (settings) => {
+      settings.deploymentPolicies.branch_policies[1] = {
+        name: 'main',
+        type: 'branch',
+      };
+    },
+  ],
+  [
+    'deployment policy count mismatch',
+    (settings) => {
+      settings.deploymentPolicies.total_count = 3;
+    },
+  ],
+]) {
+  const invalid = releaseSettings();
+  mutate(invalid);
+  assert.throws(
+    () =>
+      verifyReleaseSettings(
+        invalid.immutable,
+        invalid.environment,
+        invalid.deploymentPolicies,
+      ),
+    undefined,
+    label,
+  );
+}
 
 const registryManifest = {
   version: '1.0.0-beta.2',
