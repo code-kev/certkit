@@ -67,6 +67,144 @@ export function assertSettingsToken(token) {
   );
 }
 
+export function verifyReleaseSettings(
+  immutable,
+  environment,
+  deploymentPolicies,
+) {
+  assert(
+    immutable && typeof immutable === 'object' && !Array.isArray(immutable),
+    'repository immutable-release settings are unavailable',
+  );
+  assert.equal(
+    immutable.enabled,
+    true,
+    'repository immutable releases must be enabled',
+  );
+  assert(
+    environment &&
+      typeof environment === 'object' &&
+      !Array.isArray(environment),
+    'npm-publish environment settings are unavailable',
+  );
+  assert.equal(
+    environment.can_admins_bypass,
+    false,
+    'npm-publish environment must not allow admin bypass',
+  );
+  assert(
+    Array.isArray(environment.protection_rules),
+    'npm-publish environment protection rules are unavailable',
+  );
+  const reviewerRules = environment.protection_rules.filter(
+    (rule) => rule?.type === 'required_reviewers',
+  );
+  assert.equal(
+    reviewerRules.length,
+    1,
+    'npm-publish environment must have exactly one required reviewer rule',
+  );
+  const reviewerRule = reviewerRules[0];
+  assert.equal(
+    reviewerRule.prevent_self_review,
+    true,
+    'npm-publish environment must prevent self-review',
+  );
+  assert(
+    Array.isArray(reviewerRule.reviewers),
+    'npm-publish required reviewers are unavailable',
+  );
+  assert.equal(
+    reviewerRule.reviewers.length,
+    2,
+    'npm-publish must have exactly the two trusted reviewers',
+  );
+  const reviewerIds = reviewerRule.reviewers.map((reviewer) => {
+    assert.equal(
+      reviewer?.type,
+      'User',
+      'npm-publish required reviewers must be individual users',
+    );
+    assert(
+      reviewer.reviewer &&
+        typeof reviewer.reviewer === 'object' &&
+        Number.isSafeInteger(reviewer.reviewer.id),
+      'npm-publish reviewer has no valid numeric identity',
+    );
+    return reviewer.reviewer.id;
+  });
+  assert.equal(
+    new Set(reviewerIds).size,
+    reviewerIds.length,
+    'npm-publish required reviewers contain duplicate identities',
+  );
+  assert.deepEqual(
+    [...reviewerIds].sort((a, b) => a - b),
+    [163148490, 260122931],
+    'npm-publish required reviewers must be code-kev and spencermbawe',
+  );
+
+  const branchPolicy = environment.deployment_branch_policy;
+  assert(
+    branchPolicy &&
+      typeof branchPolicy === 'object' &&
+      !Array.isArray(branchPolicy),
+    'npm-publish deployment branch policy is unavailable',
+  );
+  assert.equal(
+    branchPolicy.protected_branches,
+    false,
+    'npm-publish must use its exact custom branch and tag policies',
+  );
+  assert.equal(
+    branchPolicy.custom_branch_policies,
+    true,
+    'npm-publish must enable custom branch and tag policies',
+  );
+  assert(
+    deploymentPolicies &&
+      typeof deploymentPolicies === 'object' &&
+      !Array.isArray(deploymentPolicies),
+    'npm-publish deployment policies are unavailable',
+  );
+  assert(
+    Array.isArray(deploymentPolicies.branch_policies),
+    'npm-publish deployment branch policies are unavailable',
+  );
+  assert.equal(
+    deploymentPolicies.total_count,
+    2,
+    'npm-publish must have exactly the main and v* deployment policies',
+  );
+  assert.equal(
+    deploymentPolicies.branch_policies.length,
+    2,
+    'npm-publish must have exactly the main and v* deployment policies',
+  );
+  const refs = deploymentPolicies.branch_policies.map((policy) => {
+    assert(
+      policy && typeof policy === 'object' && !Array.isArray(policy),
+      'npm-publish deployment policy is malformed',
+    );
+    assert(
+      typeof policy.name === 'string' &&
+        ['branch', 'tag'].includes(policy.type),
+      'npm-publish deployment policy ref is malformed',
+    );
+    return `${policy.type}:${policy.name}`;
+  });
+  assert.equal(
+    new Set(refs).size,
+    refs.length,
+    'npm-publish deployment policies contain duplicate refs',
+  );
+  assert.deepEqual(
+    [...refs].sort(),
+    ['branch:main', 'tag:v*'],
+    'npm-publish must be limited to the main branch and v* tags',
+  );
+}
+
 export function releaseStateForTag(releases, tag) {
   const matches = releases.filter((release) => release.tag_name === tag);
   assert(matches.length <= 1, `ambiguous releases for ${tag}`);
@@ -419,23 +557,16 @@ async function listCheckRuns(sha) {
 
 async function assertReleaseSettings() {
   assertSettingsToken(process.env.RELEASE_SETTINGS_TOKEN);
-  const [immutable, environment] = await Promise.all([
+  const [immutable, environment, deploymentPolicies] = await Promise.all([
     githubGet('immutable-releases', process.env.RELEASE_SETTINGS_TOKEN),
     githubGet('environments/npm-publish'),
-  ]);
-  assert.equal(
-    immutable.enabled,
-    true,
-    'repository immutable releases must be enabled',
-  );
-  assert(
-    environment.protection_rules?.some(
-      (rule) => rule.type === 'required_reviewers' && rule.reviewers?.length,
+    githubGet(
+      'environments/npm-publish/deployment-branch-policies?per_page=100',
     ),
-    'npm-publish environment must have at least one required reviewer',
-  );
+  ]);
+  verifyReleaseSettings(immutable, environment, deploymentPolicies);
   console.log(
-    'immutable releases and npm-publish required reviewer are configured',
+    'immutable releases and npm-publish trusted reviewers and refs are configured',
   );
 }
 

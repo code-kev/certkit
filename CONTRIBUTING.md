@@ -32,7 +32,9 @@ Tests run with fixtures by default. Native trust tests can change OS trust setti
 
 ## Pull requests
 
-- Keep changes focused and explain the user-visible reason.
+- Community contributors and casual testers should work from forks. Keep pull requests focused and explain the user-visible reason. Only `code-kev` merges changes to `main`.
+- Every pull request needs one approval from an independent reviewer. `code-kev` and `spencermbawe` are eligible reviewers, but an author cannot approve their own change. New commits dismiss stale approvals, the latest push needs approval from someone other than its pusher, and review conversations must be resolved.
+- Required checks must pass before merge. Merges use squash merge after an independent approval; reviewer access does not grant permission to merge into `main`.
 - Add or update tests for behavior changes and documentation for user-visible behavior.
 - Add a Changesets entry for package behavior changes. Documentation-only changes do not need one.
 - Run the relevant checks above and include the results in the pull request.
