@@ -36,6 +36,8 @@ jobs:
       - run: node test/check-source-policy.negative.mjs
       - run: node test/check-changeset.negative.mjs
       - run: node test/release-gates.negative.mjs
+      - run: node test/consumer-lock.negative.mjs
+      - run: node test/brace-depth.negative.mjs
   typecheck:
     name: typecheck
     runs-on: ubuntu-latest

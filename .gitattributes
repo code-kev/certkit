@@ -1,2 +1,4 @@
 * text=auto eol=lf
 test/**/fixtures/** -text
+# Unified diff context includes a single-space prefix on empty lines.
+patches/*.patch -whitespace

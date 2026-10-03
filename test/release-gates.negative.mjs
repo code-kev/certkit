@@ -25,10 +25,159 @@ import {
   verifyManifest,
   verifyPublishedRelease,
   verifyRegistryIntegrity,
+  verifyReleaseSettings,
   verifyRepository,
   verifyTagVersion,
   waitForRegistryIntegrity,
+  writeManifest,
 } from '../scripts/release.mjs';
+
+const releaseSettings = () => ({
+  immutable: { enabled: true },
+  environment: {
+    can_admins_bypass: false,
+    protection_rules: [
+      {
+        type: 'required_reviewers',
+        prevent_self_review: true,
+        reviewers: [
+          { type: 'User', reviewer: { id: 163148490, login: 'code-kev' } },
+          {
+            type: 'User',
+            reviewer: { id: 260122931, login: 'spencermbawe' },
+          },
+        ],
+      },
+    ],
+    deployment_branch_policy: {
+      protected_branches: false,
+      custom_branch_policies: true,
+    },
+  },
+  deploymentPolicies: {
+    total_count: 2,
+    branch_policies: [
+      { name: 'main', type: 'branch' },
+      { name: 'v*', type: 'tag' },
+    ],
+  },
+});
+const validReleaseSettings = releaseSettings();
+verifyReleaseSettings(
+  validReleaseSettings.immutable,
+  validReleaseSettings.environment,
+  validReleaseSettings.deploymentPolicies,
+);
+for (const [label, mutate] of [
+  [
+    'immutable releases disabled',
+    (settings) => {
+      settings.immutable.enabled = false;
+    },
+  ],
+  [
+    'environment self-review enabled',
+    (settings) => {
+      settings.environment.protection_rules[0].prevent_self_review = false;
+    },
+  ],
+  [
+    'environment admin bypass enabled',
+    (settings) => {
+      settings.environment.can_admins_bypass = true;
+    },
+  ],
+  [
+    'missing environment admin bypass setting',
+    (settings) => {
+      delete settings.environment.can_admins_bypass;
+    },
+  ],
+  [
+    'nested reviewer property cannot override environment admin bypass',
+    (settings) => {
+      settings.environment.can_admins_bypass = true;
+      settings.environment.protection_rules[0].can_admins_bypass = false;
+    },
+  ],
+  [
+    'unknown reviewer',
+    (settings) => {
+      settings.environment.protection_rules[0].reviewers[1].reviewer.id = 7;
+    },
+  ],
+  [
+    'additional reviewer',
+    (settings) => {
+      settings.environment.protection_rules[0].reviewers.push({
+        type: 'User',
+        reviewer: { id: 7 },
+      });
+    },
+  ],
+  [
+    'team reviewer',
+    (settings) => {
+      settings.environment.protection_rules[0].reviewers[1].type = 'Team';
+    },
+  ],
+  [
+    'missing reviewer rule',
+    (settings) => {
+      settings.environment.protection_rules = [];
+    },
+  ],
+  [
+    'duplicate reviewer identity',
+    (settings) => {
+      settings.environment.protection_rules[0].reviewers[1].reviewer.id = 163148490;
+    },
+  ],
+  [
+    'broad deployment refs',
+    (settings) => {
+      settings.deploymentPolicies.branch_policies[1] = {
+        name: '*',
+        type: 'branch',
+      };
+    },
+  ],
+  [
+    'missing deployment ref',
+    (settings) => {
+      settings.deploymentPolicies.branch_policies.pop();
+      settings.deploymentPolicies.total_count = 1;
+    },
+  ],
+  [
+    'duplicate deployment ref',
+    (settings) => {
+      settings.deploymentPolicies.branch_policies[1] = {
+        name: 'main',
+        type: 'branch',
+      };
+    },
+  ],
+  [
+    'deployment policy count mismatch',
+    (settings) => {
+      settings.deploymentPolicies.total_count = 3;
+    },
+  ],
+]) {
+  const invalid = releaseSettings();
+  mutate(invalid);
+  assert.throws(
+    () =>
+      verifyReleaseSettings(
+        invalid.immutable,
+        invalid.environment,
+        invalid.deploymentPolicies,
+      ),
+    undefined,
+    label,
+  );
+}
 
 const registryManifest = {
   version: '1.0.0-beta.2',
@@ -750,6 +899,97 @@ assert.match(
   releaseWorkflow,
   /name: Check out release controls[\s\S]*?ref: \$\{\{ github\.workflow_sha \}\}[\s\S]*?path: release-controls[\s\S]*?persist-credentials: false/,
 );
+
+// Recovery must use the pinned workflow controls when source helpers predate them.
+const consumerRecovery = mkdtempSync(
+  join(tmpdir(), 'certkit-consumer-recovery-'),
+);
+try {
+  const controls = join(consumerRecovery, 'release-controls', 'scripts');
+  mkdirSync(join(controls, 'consumer'), { recursive: true });
+  for (const file of [
+    'prepare-consumer.mjs',
+    'release.mjs',
+    'check-deps.mjs',
+    'consumer/package.json',
+    'consumer/package-lock.json',
+  ]) {
+    writeFileSync(
+      join(controls, file),
+      readFileSync(new URL(`../scripts/${file}`, import.meta.url)),
+    );
+  }
+  mkdirSync(join(consumerRecovery, 'scripts'));
+  for (const file of ['prepare-consumer.mjs', 'check-deps.mjs']) {
+    writeFileSync(
+      join(consumerRecovery, 'scripts', file),
+      'throw new Error("historical source has no consumer controls");\n',
+    );
+  }
+  mkdirSync(join(consumerRecovery, 'package'));
+  const pkg = JSON.parse(
+    readFileSync(new URL('../package.json', import.meta.url)),
+  );
+  writeFileSync(
+    join(consumerRecovery, 'package', 'package.json'),
+    JSON.stringify(pkg),
+  );
+  mkdirSync(join(consumerRecovery, 'release'));
+  const tarball = join(consumerRecovery, 'release', 'certkit-fixture.tgz');
+  const packed = spawnSync('tar', [
+    '-czf',
+    tarball,
+    '-C',
+    consumerRecovery,
+    'package',
+  ]);
+  assert.equal(packed.status, 0);
+  writeManifest(tarball, join(consumerRecovery, 'release', 'manifest.json'), {
+    sha: 'a'.repeat(40),
+    version: pkg.version,
+    runId: '42',
+  });
+  const bin = join(consumerRecovery, 'bin');
+  mkdirSync(bin);
+  writeFileSync(join(bin, 'npm'), '#!/bin/sh\n[ "$1" = ci ] || exit 1\n', {
+    mode: 0o755,
+  });
+  const recovered = spawnSync(
+    'bash',
+    [
+      '-e',
+      '-o',
+      'pipefail',
+      '-c',
+      workflowStepScript(
+        'Verify transferred digest and install the locked consumer',
+      ),
+    ],
+    {
+      cwd: consumerRecovery,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH}`,
+        GITHUB_WORKSPACE: consumerRecovery,
+        RELEASE_SHA: 'a'.repeat(40),
+        RELEASE_VERSION: pkg.version,
+        ARTIFACT_RUN_ID: '42',
+      },
+    },
+  );
+  assert.equal(
+    recovered.status,
+    0,
+    `historical consumer recovery failed: ${recovered.stderr}`,
+  );
+  const lock = JSON.parse(
+    readFileSync(join(consumerRecovery, 'consumer', 'package-lock.json')),
+  );
+  assert.equal(lock.packages['node_modules/certkit'].version, pkg.version);
+} finally {
+  rmSync(consumerRecovery, { recursive: true, force: true });
+}
 
 const prereleaseScript = workflowStepScript('Set draft prerelease metadata');
 const prereleaseFixture = mkdtempSync(
