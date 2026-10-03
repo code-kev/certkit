@@ -11,6 +11,23 @@ readback and rejection check remain pending. These machine results do not
 establish coverage for other Windows releases or locales; see the
 [trust matrix](trust-matrix.md).
 
+## Development dependency security guard
+
+The frozen pnpm install applies `patches/braces@3.0.3.patch` for
+[GHSA-vfj7-8cjw-p6xm](https://github.com/advisories/GHSA-vfj7-8cjw-p6xm).
+It caps parser nesting and direct AST walker depth at 100 before recursive
+processing. The cap also covers parentheses and cannot be raised by a caller
+option. This is a temporary backport based on
+[the upstream fix](https://github.com/micromatch/braces/pull/72).
+`node test/brace-depth.negative.mjs` checks the actual Changesets transitive
+dependency, including escaped/quoted patterns and direct AST calls.
+
+This dependency is used by development tooling and is absent from certkit's
+production dependency closure. The installed package still reports version
+3.0.3, so version-based advisory scanners may continue to flag it. Keep the
+advisory visible and remove the patch only after a reviewed upstream release
+provides equivalent guards and the regressions pass.
+
 ## macOS acceptance gate
 
 On the macOS hosted runners exercised on September 30, 2026,

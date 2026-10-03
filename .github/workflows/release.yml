@@ -281,18 +281,16 @@ jobs:
           run-id: ${{ needs.produce.outputs.run_id }}
           github-token: ${{ github.token }}
           path: release
-      - name: Verify transferred digest and install the tarball
+      - name: Verify transferred digest and install the locked consumer
         env:
           RELEASE_SHA: ${{ needs.validate.outputs.selected }}
           RELEASE_VERSION: ${{ needs.validate.outputs.version }}
           ARTIFACT_RUN_ID: ${{ needs.produce.outputs.run_id }}
-        run: | # zizmor: ignore[adhoc-packages] the smoke must install this exact local tarball.
+        run: |
           tarball="$(find release -maxdepth 1 -name 'certkit-*.tgz' -type f -print -quit)"
-          node scripts/release.mjs verify "$tarball" release/manifest.json
-          mkdir consumer
+          node scripts/prepare-consumer.mjs "$tarball" release/manifest.json consumer
           cd consumer
-          npm init --yes
-          npm install --ignore-scripts --no-audit --no-fund "../$tarball"
+          npm ci --ignore-scripts --no-audit --no-fund
           node "$GITHUB_WORKSPACE/scripts/check-deps.mjs" --consumer-tree "$PWD"
       - name: Check exports, declarations and CLI
         env:
