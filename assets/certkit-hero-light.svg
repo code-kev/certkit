@@ -1,8 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="300" viewBox="0 0 1000 300" role="img" aria-labelledby="title desc">
-  <title id="title">certkit</title>
-  <desc id="desc">Local certificate tools for HTTPS development.</desc>
-  <rect width="1000" height="300" fill="#f2efe7"/>
-  <text x="72" y="148" fill="#242522" font-family="Georgia, 'Times New Roman', serif" font-size="94" letter-spacing="-5">certkit</text>
-  <path d="M74 185H926" stroke="#b9b5aa" stroke-width="1"/>
-  <text x="76" y="224" fill="#55554e" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="18" letter-spacing="1.2">LOCAL CERTIFICATES / JAVASCRIPT / CLI / VITE</text>
-</svg>

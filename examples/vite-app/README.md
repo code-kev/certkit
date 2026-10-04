@@ -15,4 +15,4 @@ pnpm exec vite
 
 The Vite config enables HTTPS. Trust-store behavior depends on the OS/browser; Linux NSS needs `certutil`. See [the trust matrix](../../docs/trust-matrix.md).
 
-The checked-in preview image is a visual snapshot of this page served over local HTTP. It does not verify HTTPS or browser certificate acceptance.
+Open the URL printed by Vite to try the app over HTTPS. Verify browser acceptance against the trust matrix for your platform.
