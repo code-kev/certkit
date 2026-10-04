@@ -1,2 +1,2 @@
-# Keep zizmor's default audits enabled; no findings are suppressed.
+# Keep zizmor's default audits enabled; document exceptions at their workflow step.
 rules: {}
