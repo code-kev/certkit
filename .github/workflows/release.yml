@@ -367,7 +367,7 @@ jobs:
           node-version: '24'
           package-manager-cache: false
       - name: Install npm for trusted publishing
-        run: |
+        run: | # zizmor: ignore[adhoc-packages] -- npm@11.21.0 bundles its dependencies; lifecycle scripts are disabled.
           npm install --global npm@11.21.0 --ignore-scripts --no-audit --no-fund
           test "$(npm --version)" = 11.21.0
       - name: Verify immutable releases and reviewer gate

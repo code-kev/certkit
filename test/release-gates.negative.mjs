@@ -262,10 +262,10 @@ const workflowStepScript = (name) => {
   assert.notEqual(start, -1, `missing workflow step: ${name}`);
   const end = releaseWorkflow.indexOf('\n      - ', start);
   const step = releaseWorkflow.slice(start, end < 0 ? undefined : end);
-  const runStart = step.indexOf('        run: |\n');
-  assert.notEqual(runStart, -1, `workflow step has no script: ${name}`);
+  const runHeader = step.match(/^ {8}run: \|(?: #.*)?\n/m);
+  assert.ok(runHeader, `workflow step has no script: ${name}`);
   return step
-    .slice(runStart + '        run: |\n'.length)
+    .slice(runHeader.index + runHeader[0].length)
     .split('\n')
     .map((line) => {
       if (line && !line.startsWith('          ')) return undefined;
