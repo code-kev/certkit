@@ -710,20 +710,73 @@ assert.doesNotMatch(sourceScript, /RESUME_TAGGED_RELEASE/);
 const registryGuardIndex = releaseWorkflow.indexOf(
   '- name: Require published version before metadata recovery',
 );
-const npmFloorIndex = releaseWorkflow.indexOf(
-  '- name: Require an OIDC-capable npm CLI',
+const npmSetupIndex = releaseWorkflow.indexOf(
+  '- name: Install npm for trusted publishing',
 );
 const publishNpmIndex = releaseWorkflow.indexOf(
   '- name: Publish the tested tarball by OIDC',
 );
 assert.ok(
-  registryGuardIndex < npmFloorIndex && npmFloorIndex < publishNpmIndex,
+  npmSetupIndex > releaseWorkflow.indexOf('\n  release:') &&
+    npmSetupIndex < registryGuardIndex &&
+    registryGuardIndex < publishNpmIndex,
 );
 assert.doesNotMatch(
   releaseWorkflow,
-  /npm install --global/,
+  /npm install --global npm(?:\s|@(?:latest|next|\*))/,
   'release publishing must not install an unpinned global npm',
 );
+const npmSetupStep = releaseWorkflow.slice(
+  npmSetupIndex,
+  releaseWorkflow.indexOf('\n      - ', npmSetupIndex),
+);
+assert.doesNotMatch(
+  npmSetupStep,
+  /^ {8}if:/m,
+  'npm setup must also run during already-published recovery',
+);
+const npmSetupScript = workflowStepScript('Install npm for trusted publishing');
+const npmSetupFixture = mkdtempSync(join(tmpdir(), 'certkit-npm-setup-'));
+try {
+  writeFileSync(
+    join(npmSetupFixture, 'npm'),
+    `#!/bin/sh
+case "$*" in
+  "install --global npm@11.21.0 --ignore-scripts --no-audit --no-fund")
+    exit "$CERTKIT_TEST_NPM_INSTALL_STATUS" ;;
+  "--version") printf '%s\\n' "$CERTKIT_TEST_NPM_VERSION" ;;
+  *) exit 2 ;;
+esac
+`,
+    { mode: 0o755 },
+  );
+  for (const [version, installStatus, succeeds] of [
+    ['11.21.0', '0', true],
+    ['11.19.0', '0', false],
+    ['11.21.0', '1', false],
+  ]) {
+    const result = spawnSync(
+      'bash',
+      ['-e', '-o', 'pipefail', '-c', npmSetupScript],
+      {
+        env: {
+          ...process.env,
+          PATH: `${npmSetupFixture}:${process.env.PATH}`,
+          CERTKIT_TEST_NPM_VERSION: version,
+          CERTKIT_TEST_NPM_INSTALL_STATUS: installStatus,
+        },
+        encoding: 'utf8',
+      },
+    );
+    assert.equal(
+      result.status === 0,
+      succeeds,
+      `npm setup must fail closed for version ${version}, install status ${installStatus}: ${result.stderr}`,
+    );
+  }
+} finally {
+  rmSync(npmSetupFixture, { recursive: true, force: true });
+}
 assert.match(
   releaseWorkflow,
   /Confirm registry integrity after publish\n {8}if: steps\.registry\.outputs\.published != 'true' && \(github\.event_name == 'push' \|\| \(github\.event_name == 'workflow_dispatch' && inputs\.resume_tagged_release\)\)/,

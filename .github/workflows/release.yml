@@ -366,6 +366,10 @@ jobs:
         with:
           node-version: '24'
           package-manager-cache: false
+      - name: Install npm for trusted publishing
+        run: |
+          npm install --global npm@11.21.0 --ignore-scripts --no-audit --no-fund
+          test "$(npm --version)" = 11.21.0
       - name: Verify immutable releases and reviewer gate
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -399,12 +403,6 @@ jobs:
         env:
           PACKAGE_PUBLISHED: ${{ steps.registry.outputs.published }}
         run: test "$PACKAGE_PUBLISHED" = true
-      - name: Require an OIDC-capable npm CLI
-        if: steps.registry.outputs.published != 'true' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.resume_tagged_release))
-        run: |
-          version="$(npm --version)"
-          node -e 'const [major, minor] = process.argv[1].split(".").map(Number); if (major < 11 || (major === 11 && minor < 5)) { console.error("npm " + process.argv[1] + " is older than the 11.5.1 floor required for OIDC trusted publishing"); process.exit(1); }' "$version"
-          echo "npm $version satisfies the OIDC trusted-publishing floor"
       - name: Publish the tested tarball by OIDC
         if: steps.registry.outputs.published != 'true' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.resume_tagged_release))
         env:
@@ -427,10 +425,10 @@ jobs:
           if [[ "${RELEASE_VERSION%%+*}" != *-* ]]; then exit 0; fi
           current="$(npm view certkit dist-tags.latest)"
           if [[ "$current" != *-* ]]; then exit 0; fi
-          # OIDC dist-tag writes need the trusted publisher's "manage dist-tags"
+          # OIDC dist-tag writes need the trusted publisher's "Allow npm dist-tag"
           # action. Warn instead of failing the release when it is not enabled.
           if ! npm dist-tag add "certkit@$RELEASE_VERSION" latest; then
-            echo "::warning::latest still points at $current; enable 'manage dist-tags' on the npm trusted publisher or run: npm dist-tag add certkit@$RELEASE_VERSION latest"
+            echo "::warning::latest still points at $current; enable 'Allow npm dist-tag' on the npm trusted publisher or run: npm dist-tag add certkit@$RELEASE_VERSION latest"
           fi
       - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
         with:
