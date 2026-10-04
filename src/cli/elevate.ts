@@ -6,7 +6,8 @@ export function shQuote(value: string): string {
 }
 
 export function elevate(argv: string[]): Promise<void> {
-  if (!argv.length || argv.some((part) => typeof part !== 'string'))
+  const executable = argv[0];
+  if (!executable || argv.some((part) => typeof part !== 'string'))
     return Promise.reject(
       new CertkitError('INVALID_OPTIONS', 'An elevated command is required.'),
     );
@@ -19,9 +20,10 @@ export function elevate(argv: string[]): Promise<void> {
     );
   const command = argv.map(shQuote).join(' ');
   // Only Linux elevates (its system store is root-owned; macOS trust is
-  // user-domain and Windows has no elevated trust command). Plain sudo on the
-  // inherited terminal: pkexec needs a GUI polkit agent that headless servers
-  // and SSH sessions lack; non-TTY sudo fails fast with the manual command.
+  // user-domain and Windows has no elevated trust command). Root runs
+  // directly; other users use plain sudo on the inherited terminal. pkexec
+  // needs a GUI polkit agent that headless servers and SSH sessions lack;
+  // non-TTY sudo fails fast with the manual command.
   if (process.platform !== 'linux')
     return Promise.reject(
       new CertkitError(
@@ -30,15 +32,23 @@ export function elevate(argv: string[]): Promise<void> {
       ),
     );
 
+  const isRoot = process.geteuid?.() === 0;
+  const manual = isRoot
+    ? `Run it manually: ${command}`
+    : `Run it manually with sudo: ${command}`;
   return new Promise((resolve, reject) => {
-    const child = spawn('sudo', argv, {
-      stdio: ['inherit', process.stderr.fd, 'inherit'],
-    });
+    const child = spawn(
+      isRoot ? executable : 'sudo',
+      isRoot ? argv.slice(1) : argv,
+      {
+        stdio: ['inherit', process.stderr.fd, 'inherit'],
+      },
+    );
     child.on('error', () =>
       reject(
         new CertkitError(
           'STORE_WRITE_FAILED',
-          `sudo is unavailable. Run it manually with sudo: ${command}`,
+          `${isRoot ? 'The command could not be started.' : 'sudo is unavailable.'} ${manual}`,
         ),
       ),
     );
@@ -50,7 +60,7 @@ export function elevate(argv: string[]): Promise<void> {
       reject(
         new CertkitError(
           'STORE_WRITE_FAILED',
-          `The elevated command failed or was cancelled. Run it manually with sudo: ${command}`,
+          `The elevated command failed or was cancelled. ${manual}`,
         ),
       );
     });

@@ -17,7 +17,7 @@ Unknown options are rejected with exit code `2` before a command runs. Put certi
 
 ## `certkit install`
 
-Create the CA if needed and install it in the detected supported stores for the current user. On macOS, trust is written to the current user's login keychain and macOS may show its native authentication prompt. On Linux, system store operations may need elevation; Linux browser NSS targets require `certutil`. On Windows, certkit writes only to the current user's Root store. WSL emits a warning that Windows browsers use Windows-side trust.
+Create the CA if needed and install it in the detected supported stores for the current user. On macOS, trust is written to the current user's login keychain and macOS may show its native authentication prompt. On Linux, system store operations run directly when the process is already root (effective UID 0), otherwise through `sudo`; Linux browser NSS targets require `certutil`. On Windows, certkit writes only to the current user's Root store. WSL emits a warning that Windows browsers use Windows-side trust.
 
 ```sh
 certkit install

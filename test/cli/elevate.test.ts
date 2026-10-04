@@ -9,6 +9,7 @@ import { elevate } from '../../src/cli/elevate.js';
 const spawnMock = vi.mocked(spawn);
 
 afterEach(() => {
+  vi.unstubAllGlobals();
   vi.restoreAllMocks();
   spawnMock.mockReset();
 });
@@ -33,10 +34,13 @@ describe('elevate', () => {
 
   it.each([
     ['linux', []],
+    ['linux', ['']],
     ['linux', ['ok', 7]],
     ['darwin', []],
+    ['darwin', ['']],
     ['darwin', ['ok', 7]],
     ['win32', []],
+    ['win32', ['']],
     ['win32', ['ok', 7]],
   ])(
     'rejects invalid argv on %s (%s) without invoking sudo',
@@ -75,24 +79,107 @@ describe('elevate', () => {
     },
   );
 
-  describe('linux sudo branch', () => {
-    function asLinux<T>(run: () => T): T {
-      const originalPlatform = process.platform;
-      Object.defineProperty(process, 'platform', { value: 'linux' });
+  describe('linux command execution', () => {
+    function asLinux<T>(
+      run: () => T,
+      euid: number | null = 1000,
+      uid = 1000,
+    ): T {
+      vi.stubGlobal('process', {
+        ...process,
+        platform: 'linux',
+        geteuid: euid === null ? undefined : () => euid,
+        getuid: () => uid,
+      });
       try {
         return run();
       } finally {
-        Object.defineProperty(process, 'platform', {
-          value: originalPlatform,
-        });
+        vi.unstubAllGlobals();
       }
     }
 
-    function fakeChild(exitCode: number): EventEmitter {
+    function fakeChild(exitCode: number | null): EventEmitter {
       const child = new EventEmitter();
       queueMicrotask(() => child.emit('exit', exitCode));
       return child;
     }
+
+    it('executes directly as effective root, preserving literal argv and stderr routing', async () => {
+      const argv = [
+        'install',
+        '-m',
+        '0644',
+        "/tmp/space 'quote; $(echo unsafe).pem",
+        '/tmp/anchor.crt',
+      ];
+      spawnMock.mockReturnValue(fakeChild(0) as never);
+      await asLinux(
+        () => expect(elevate(argv)).resolves.toBeUndefined(),
+        0,
+        1000,
+      );
+      expect(spawnMock).toHaveBeenCalledExactlyOnceWith(
+        'install',
+        argv.slice(1),
+        {
+          stdio: ['inherit', process.stderr.fd, 'inherit'],
+        },
+      );
+    });
+
+    it('still uses sudo when only the real UID is root', async () => {
+      spawnMock.mockReturnValue(fakeChild(0) as never);
+      await asLinux(
+        () => expect(elevate(['update-ca-trust'])).resolves.toBeUndefined(),
+        1000,
+        0,
+      );
+      expect(spawnMock).toHaveBeenCalledWith('sudo', ['update-ca-trust'], {
+        stdio: ['inherit', process.stderr.fd, 'inherit'],
+      });
+    });
+
+    it('uses sudo when the effective UID API is unavailable', async () => {
+      spawnMock.mockReturnValue(fakeChild(0) as never);
+      await asLinux(
+        () => expect(elevate(['update-ca-trust'])).resolves.toBeUndefined(),
+        null,
+      );
+      expect(spawnMock).toHaveBeenCalledWith('sudo', ['update-ca-trust'], {
+        stdio: ['inherit', process.stderr.fd, 'inherit'],
+      });
+    });
+
+    it.each([1, null])(
+      'rejects a failed root command (%s) with manual guidance that needs no sudo',
+      async (code) => {
+        spawnMock.mockReturnValue(fakeChild(code) as never);
+        await asLinux(
+          () =>
+            expect(elevate(['update-ca-trust'])).rejects.toMatchObject({
+              code: 'STORE_WRITE_FAILED',
+              message:
+                "The elevated command failed or was cancelled. Run it manually: 'update-ca-trust'",
+            }),
+          0,
+        );
+      },
+    );
+
+    it('rejects when the root command cannot be started, without sudo guidance', async () => {
+      const child = new EventEmitter();
+      queueMicrotask(() => child.emit('error', new Error('spawn ENOENT')));
+      spawnMock.mockReturnValue(child as never);
+      await asLinux(
+        () =>
+          expect(elevate(['update-ca-trust'])).rejects.toMatchObject({
+            code: 'STORE_WRITE_FAILED',
+            message:
+              "The command could not be started. Run it manually: 'update-ca-trust'",
+          }),
+        0,
+      );
+    });
 
     it('elevates through plain sudo with inherited stdio', async () => {
       asLinux(() => {
